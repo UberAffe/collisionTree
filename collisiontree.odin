@@ -141,14 +141,17 @@ UpdateNodeBounds :: proc(nodeIdx: uint) {
 	bvhNode[nodeIdx].aabbMax = {-MAX_F32, -MAX_F32, -MAX_F32}
 	first := bvhNode[nodeIdx].firstTriIdx
 	for i in 0 ..< bvhNode[nodeIdx].triCount {
-		leaf := tri[triIdx[first + i]]
-		bvhNode[nodeIdx].aabbMin = fminf(bvhNode[nodeIdx].aabbMin, leaf.vertex0)
-		bvhNode[nodeIdx].aabbMin = fminf(bvhNode[nodeIdx].aabbMin, leaf.vertex1)
-		bvhNode[nodeIdx].aabbMin = fminf(bvhNode[nodeIdx].aabbMin, leaf.vertex2)
-		bvhNode[nodeIdx].aabbMax = fmaxf(bvhNode[nodeIdx].aabbMax, leaf.vertex0)
-		bvhNode[nodeIdx].aabbMax = fmaxf(bvhNode[nodeIdx].aabbMax, leaf.vertex1)
-		bvhNode[nodeIdx].aabbMax = fmaxf(bvhNode[nodeIdx].aabbMax, leaf.vertex2)
+		UpdateTriangleAABB(&bvhNode[nodeIdx],tri[triIdx[first + i]])
 	}
+}
+
+UpdateTriangleAABB :: proc(node: ^BVHNode, leaf: Tri) {
+	node.aabbMin = fminf(node.aabbMin, leaf.vertex0)
+	node.aabbMin = fminf(node.aabbMin, leaf.vertex1)
+	node.aabbMin = fminf(node.aabbMin, leaf.vertex2)
+	node.aabbMax = fmaxf(node.aabbMax, leaf.vertex0)
+	node.aabbMax = fmaxf(node.aabbMax, leaf.vertex1)
+	node.aabbMax = fmaxf(node.aabbMax, leaf.vertex2)
 }
 
 Subdivide :: proc(nodeIdx: uint) {

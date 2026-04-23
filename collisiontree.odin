@@ -5,6 +5,7 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import time "core:time"
 import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
@@ -28,10 +29,10 @@ rootNodeIdx, nodesUsed: uint = 0, 1
 
 
 main :: proc() {
-	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	defer mem.tracking_allocator_destroy(&track)
-	context.allocator = mem.tracking_allocator(&track)
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, context.allocator)
+	defer mem.dynamic_arena_destroy(&arena)
+
 
 	rf := rand.float32_uniform
 	// Create N random triangles and populate the arrays
@@ -56,16 +57,30 @@ main :: proc() {
 	defer rl.CloseWindow()
 	ray := Ray{}
 	pixelPos: fl3
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	stopWatch := time.Stopwatch{}
+	searchTime, drawTime: time.Duration
+	bIter,tIter,b,t:uint
 	for !rl.WindowShouldClose() {
+		defer mem.dynamic_arena_free_all(&arena)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		ray.O = camPos
-		for y in 0 ..< 640 {
-			for x in 0 ..< 640 {
-				pixelPos = p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y) / 640)
+		searchTime = 0
+		drawTime = 0
+		bIter=0
+		tIter=0
+		for y in 0 ..< 640/2 {
+			for x in 0 ..< 640/2 {
+				pixelPos = p0 + (p1 - p0) * (f32(x*2) / 640) + (p2 - p0) * (f32(y*2) / 640)
 				ray.D = la.normalize(pixelPos - ray.O)
 				ray.t = MAX_F32
-				intersectBVH(&ray, rootNodeIdx)
+				time.stopwatch_start(&stopWatch)
+				b,t=intersectBVH(&ray, rootNodeIdx)
+				bIter+=b
+				tIter+=t
+				searchTime += time.stopwatch_duration(stopWatch)
+				time.stopwatch_reset(&stopWatch)
 				if ray.t > 0 && ray.t < MAX_F32 {
 					// not a fast function, but with a stable data set, it should give a consistent impact on FPS, not a scaling one.
 					rl.DrawPixelV(
@@ -73,30 +88,43 @@ main :: proc() {
 						{u8(ray.t * ray.t), 200, 255, 255},
 					)
 				}
+				drawTime += time.stopwatch_duration(stopWatch)
+				time.stopwatch_stop(&stopWatch)
 			}
 		}
+		rl.DrawText(
+			fmt.ctprintf("search time: %v, draw time: %v\niterations B: %v, T: %v", searchTime, drawTime,bIter,tIter),
+			10,
+			30,
+			16,
+			{10, 10, 10, 255},
+		)
 		rl.DrawFPS(10, 10)
 		rl.EndDrawing()
-		// I'm not seeing any memory leak, but something is still causing it to slow down over time ...
-		for _, leak in track.allocation_map {
-			fmt.printf("%v leaked %m\n", leak.location, leak.size)
-		}
 	}
 
 }
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
-intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) {
-	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return
+intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint,uint) {
+	bvhIterations := uint(1)
+	triIterations:= uint(0)
+	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return bvhIterations,triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
 			intersectTri(ray, tri[triIdx[bvhNode[nodeIdx].firstTriIdx + i]])
+			triIterations+=1
 		}
 	} else {
-		intersectBVH(ray, bvhNode[nodeIdx].leftNode)
-		intersectBVH(ray, bvhNode[nodeIdx].leftNode + 1)
+		b,t: uint
+		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftNode)
+		bvhIterations+=b
+		triIterations+=t
+		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftNode + 1)
+		bvhIterations+=b
+		triIterations+=t
 	}
-
+	return bvhIterations,triIterations
 }
 
 IntersectAABB :: proc(ray: Ray, bmin, bmax: fl3) -> bool {
@@ -146,7 +174,7 @@ UpdateNodeBounds :: proc(nodeIdx: uint) {
 	bvhNode[nodeIdx].aabbMax = {-MAX_F32, -MAX_F32, -MAX_F32}
 	first := bvhNode[nodeIdx].firstTriIdx
 	for i in 0 ..< bvhNode[nodeIdx].triCount {
-		UpdateTriangleAABB(&bvhNode[nodeIdx],tri[triIdx[first + i]])
+		UpdateTriangleAABB(&bvhNode[nodeIdx], tri[triIdx[first + i]])
 	}
 }
 

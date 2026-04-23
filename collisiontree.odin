@@ -34,6 +34,8 @@ main :: proc() {
 	context.allocator = mem.tracking_allocator(&track)
 
 	rf := rand.float32_uniform
+	// Create N random triangles and populate the arrays
+	// triIdx is a lookup table to avoid moving the data in the tri array.
 	for &t, i in triIdx {
 		triangle := Tri{}
 		r0 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
@@ -63,8 +65,9 @@ main :: proc() {
 				pixelPos = p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y) / 640)
 				ray.D = la.normalize(pixelPos - ray.O)
 				ray.t = MAX_F32
-				intersectBVH(&ray, 0)
+				intersectBVH(&ray, rootNodeIdx)
 				if ray.t > 0 && ray.t < MAX_F32 {
+					// not a fast function, but with a stable data set, it should give a consistent impact on FPS, not a scaling one.
 					rl.DrawPixelV(
 						{pixelPos.x * 320 + 320, pixelPos.y * 320 + 320},
 						{u8(ray.t * ray.t), 200, 255, 255},
@@ -74,6 +77,7 @@ main :: proc() {
 		}
 		rl.DrawFPS(10, 10)
 		rl.EndDrawing()
+		// I'm not seeing any memory leak, but something is still causing it to slow down over time ...
 		for _, leak in track.allocation_map {
 			fmt.printf("%v leaked %m\n", leak.location, leak.size)
 		}
@@ -81,6 +85,7 @@ main :: proc() {
 
 }
 
+// Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
 intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) {
 	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return
 	if bvhNode[nodeIdx].triCount > 0 {

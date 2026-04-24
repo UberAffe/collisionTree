@@ -24,8 +24,8 @@ Ray :: struct {
 
 tri := [N]Tri{}
 triIdx := [N]uint{}
-bvhNode := [N * 2 - 1]BVHNode{}
-rootNodeIdx, nodesUsed: uint = 0, 1
+bvhNode := [N * 2]BVHNode{}
+rootNodeIdx, nodesUsed: uint = 0, 2
 
 
 main :: proc() {
@@ -46,7 +46,6 @@ main :: proc() {
 		triangle.vertex1 = triangle.vertex0 + r1 * 2
 		triangle.vertex2 = triangle.vertex0 + r2 * 2
 		tri[i] = triangle
-		t = uint(i)
 	}
 	rl.InitWindow(640, 640, "test")
 	camPos := fl3{0, 0, -18}
@@ -58,7 +57,8 @@ main :: proc() {
 	ray := Ray{}
 	pixelPos: fl3
 	context.allocator = mem.dynamic_arena_allocator(&arena)
-	stopWatch := time.Stopwatch{}
+	searchWatch := time.Stopwatch{}
+	drawWatch:= time.Stopwatch{}
 	searchTime, drawTime: time.Duration
 	bIter,tIter,b,t:uint
 	for !rl.WindowShouldClose() {
@@ -66,8 +66,8 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		ray.O = camPos
-		searchTime = 0
-		drawTime = 0
+		time.stopwatch_reset(&searchWatch)
+		time.stopwatch_reset(&drawWatch)
 		bIter=0
 		tIter=0
 		for y in 0 ..< 640/2 {
@@ -75,25 +75,25 @@ main :: proc() {
 				pixelPos = p0 + (p1 - p0) * (f32(x*2) / 640) + (p2 - p0) * (f32(y*2) / 640)
 				ray.D = la.normalize(pixelPos - ray.O)
 				ray.t = MAX_F32
-				time.stopwatch_start(&stopWatch)
+				time.stopwatch_start(&searchWatch)
 				b,t=intersectBVH(&ray, rootNodeIdx)
+				time.stopwatch_stop(&searchWatch)
 				bIter+=b
 				tIter+=t
-				searchTime += time.stopwatch_duration(stopWatch)
-				time.stopwatch_reset(&stopWatch)
 				if ray.t > 0 && ray.t < MAX_F32 {
 					// not a fast function, but with a stable data set, it should give a consistent impact on FPS, not a scaling one.
+					time.stopwatch_start(&drawWatch)
 					rl.DrawPixelV(
 						{pixelPos.x * 320 + 320, pixelPos.y * 320 + 320},
 						{u8(ray.t * ray.t), 200, 255, 255},
 					)
+					time.stopwatch_stop(&drawWatch)
 				}
-				drawTime += time.stopwatch_duration(stopWatch)
-				time.stopwatch_stop(&stopWatch)
+				
 			}
 		}
 		rl.DrawText(
-			fmt.ctprintf("search time: %v, draw time: %v\niterations B: %v, T: %v", searchTime, drawTime,bIter,tIter),
+			fmt.ctprintf("search time: %v, draw time: %v\niterations B: %v, T: %v", time.stopwatch_duration(searchWatch), time.stopwatch_duration(drawWatch),bIter,tIter),
 			10,
 			30,
 			16,
@@ -112,15 +112,15 @@ intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint,uint) {
 	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return bvhIterations,triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			intersectTri(ray, tri[triIdx[bvhNode[nodeIdx].firstTriIdx + i]])
+			intersectTri(ray, tri[triIdx[bvhNode[nodeIdx].leftFirst + i]])
 			triIterations+=1
 		}
 	} else {
 		b,t: uint
-		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftNode)
+		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst)
 		bvhIterations+=b
 		triIterations+=t
-		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftNode + 1)
+		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst + 1)
 		bvhIterations+=b
 		triIterations+=t
 	}
@@ -161,8 +161,9 @@ intersectTri :: proc(ray: ^Ray, tri: Tri) {
 }
 
 BuildBVH :: proc() {
-	for &t in tri {
+	for &t,i in tri {
 		t.centroid = (t.vertex0 + t.vertex1 + t.vertex2) / 3
+		triIdx[i]=uint(i)
 	}
 	bvhNode[rootNodeIdx].triCount = N
 	UpdateNodeBounds(rootNodeIdx)
@@ -172,9 +173,8 @@ BuildBVH :: proc() {
 UpdateNodeBounds :: proc(nodeIdx: uint) {
 	bvhNode[nodeIdx].aabbMin = {MAX_F32, MAX_F32, MAX_F32}
 	bvhNode[nodeIdx].aabbMax = {-MAX_F32, -MAX_F32, -MAX_F32}
-	first := bvhNode[nodeIdx].firstTriIdx
 	for i in 0 ..< bvhNode[nodeIdx].triCount {
-		UpdateTriangleAABB(&bvhNode[nodeIdx], tri[triIdx[first + i]])
+		UpdateTriangleAABB(&bvhNode[nodeIdx], tri[triIdx[bvhNode[nodeIdx].leftFirst + i]])
 	}
 }
 
@@ -196,7 +196,7 @@ Subdivide :: proc(nodeIdx: uint) {
 	if extent.z > extent[axis] do axis = 2
 	splitPos := bvhNode[nodeIdx].aabbMin[axis] + extent[axis] * .5
 	//in place partition
-	i := int(bvhNode[nodeIdx].firstTriIdx)
+	i := int(bvhNode[nodeIdx].leftFirst)
 	j := i + int(bvhNode[nodeIdx].triCount) - 1
 	for i <= j {
 		if tri[triIdx[i]].centroid[axis] < splitPos {
@@ -207,17 +207,17 @@ Subdivide :: proc(nodeIdx: uint) {
 		}
 	}
 	//abort split if one side empty
-	leftCount := uint(i) - bvhNode[nodeIdx].firstTriIdx
+	leftCount := uint(i) - bvhNode[nodeIdx].leftFirst
 	if leftCount == 0 || leftCount == bvhNode[nodeIdx].triCount do return
 	// create child nodes
 	leftChildIdx := nodesUsed
 	nodesUsed += 1
 	rightChildIdx := nodesUsed
 	nodesUsed += 1
-	bvhNode[nodeIdx].leftNode = leftChildIdx
-	bvhNode[leftChildIdx].firstTriIdx = bvhNode[nodeIdx].firstTriIdx
+	bvhNode[leftChildIdx].leftFirst = bvhNode[nodeIdx].leftFirst
+	bvhNode[nodeIdx].leftFirst = leftChildIdx
 	bvhNode[leftChildIdx].triCount = leftCount
-	bvhNode[rightChildIdx].firstTriIdx = uint(i)
+	bvhNode[rightChildIdx].leftFirst = uint(i)
 	bvhNode[rightChildIdx].triCount = bvhNode[nodeIdx].triCount - leftCount
 	bvhNode[nodeIdx].triCount = 0
 	UpdateNodeBounds(leftChildIdx)
@@ -240,5 +240,5 @@ fmaxf :: proc(first, second: fl3) -> fl3 {
 
 BVHNode :: struct {
 	aabbMin, aabbMax:                fl3,
-	leftNode, firstTriIdx, triCount: uint,
+	leftFirst, triCount: uint,
 }

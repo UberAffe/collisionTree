@@ -5,14 +5,13 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
-import "core:mem/virtual"
 import os "core:os"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
-N :: 1024
+N :: 64
 scanSize: uint
 
 fl3 :: [3]f32
@@ -27,8 +26,14 @@ Ray :: struct {
 	t:    f32,
 }
 
+BVHNode :: struct {
+	aabbMin, aabbMax:    fl3, //3d coordinate
+	leftFirst, triCount: uint, 
+	//total size 32 bytes
+}
+
 ThreadContext :: struct {
-	ray:                        Ray,
+	rays:                       [dynamic]Ray,
 	searchTime:                 time.Duration,
 	xStart, yStart, xLen, yLen: uint,
 	Pixels:                     map[ui2]f32,
@@ -41,7 +46,7 @@ TaskRunner :: struct {
 }
 
 tri := [N]Tri{}
-triIdx := [N]uint{}
+shapeIdx := [N]uint{}
 bvhNode := [N * 2]BVHNode{} //N 64 byte pages for optimal loading
 rootNodeIdx, nodesUsed: uint = 0, 2
 num_CPU: int
@@ -77,17 +82,18 @@ main :: proc() {
 
 	rl.InitWindow(640, 640, "test")
 	defer rl.CloseWindow()
-
 	searchTime: time.Duration
 	camPos := fl3{0, 0, -18}
-
+	p0 := fl3{-1, 1, -15}
+	p1 := fl3{1, 1, -15}
+	p2 := fl3{-1, -1, -15}
 	pool: thread.Pool
 	thread.pool_init(&pool, pool_allocator, num_CPU)
 	defer thread.pool_destroy(&pool)
 	thread.pool_start(&pool)
 	for !rl.WindowShouldClose() {
 		// defer mem.dynamic_pool_free_all(&dyn_pool)
-		fmt.println("start of frame")
+		// fmt.println("start of frame")
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		yStart: uint = 0
@@ -96,18 +102,28 @@ main :: proc() {
 		remaining = 640
 		for runner, i in runners {
 			// tc := &contexts[i]
-			contexts[i].ray.O = camPos
+			
 			contexts[i].xStart = xStart
 			contexts[i].yStart = yStart
 			contexts[i].yLen = 640
 			contexts[i].xLen = math.min(scanSize, remaining)
+			contexts[i].rays = make([dynamic]Ray,contexts[i].xLen*contexts[i].yLen)
+			for &ray, j in contexts[i].rays{
+				y:= uint(j)/contexts[i].xLen
+				x:= uint(j)%contexts[i].xLen
+				ray.O=camPos
+				ray.D= la.normalize((p0 +
+				(p1 - p0) * (f32(x + xStart) / 640) +
+				(p2 - p0) * (f32(y + yStart) / 640))-ray.O)
+				ray.t=MAX_F32
+			}
 			contexts[i].bvhTree = bvhNode[:]
 			remaining -= contexts[i].xLen
 			xStart += contexts[i].xLen
 			contexts[i].Pixels = make(map[ui2]f32)
 			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i)
 		}
-		fmt.printfln("starting pool: %v", thread.pool_num_outstanding(&pool))
+		// fmt.printfln("starting pool: %v", thread.pool_num_outstanding(&pool))
 
 		for thread.pool_num_outstanding(&pool) > 0 {
 			// fmt.printf("| %v", thread.pool_num_outstanding(&pool))
@@ -115,19 +131,31 @@ main :: proc() {
 		}
 		searchTime += processThreadOutput(&pool)
 		rl.DrawFPS(10, 10)
-		rl.DrawText(fmt.ctprintf("cumulative search time: %v\naverage search time: %v", searchTime,searchTime / time.Duration(num_CPU)), 10, 40, 16, {0, 0, 0, 255})
+		rl.DrawText(
+			fmt.ctprintf(
+				"build time: %v\ncumulative search time: %v\naverage search time: %v\n409,600 rays across %v threads",
+				time.stopwatch_duration(bWatch),
+				searchTime,
+				searchTime / time.Duration(num_CPU),
+				num_CPU,
+			),
+			10,
+			40,
+			16,
+			{0, 0, 0, 255},
+		)
 		rl.EndDrawing()
 		// fmt.printfln("cumulative search time: %v", searchTime)
 		// fmt.printfln("average search time: %v", searchTime / time.Duration(num_CPU))
 	}
 	thread.pool_shutdown(&pool)
-	fmt.printfln("Did we actually mean to close? %v", rl.WindowShouldClose())
+	// fmt.printfln("Did we actually mean to close? %v", rl.WindowShouldClose())
 }
 
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 	task, ok := thread.pool_pop_done(pool)
 	if ok {
-		fmt.printfln("drawing thread %v results", task.user_index)
+		// fmt.printfln("drawing thread %v results", task.user_index)
 		tc := cast(^ThreadContext)task.data
 		for key, value in tc.Pixels {
 			rl.DrawPixelV(
@@ -143,26 +171,13 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 threadScan :: proc(task: thread.Task) {
 	// defer mem.free_all(task.allocator)
 	tc := cast(^ThreadContext)task.data
-	camPos := fl3{0, 0, -18}
-	p0 := fl3{-1, 1, -15}
-	p1 := fl3{1, 1, -15}
-	p2 := fl3{-1, -1, -15}
-	ray := &tc.ray
 	tc.searchTime = 0
 	// fmt.printfln("bvh size: %v, start: (%v,%v), end: (%v,%v)",len(bvhNode),tc.xStart,tc.yStart,tc.xStart+tc.xLen-1,tc.yStart+tc.yLen-1)
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
-	for y in 0 ..< uint(tc.yLen) {
-		for x in 0 ..< uint(tc.xLen) {
-			pixelPos :=
-				p0 +
-				(p1 - p0) * (f32(x + tc.xStart) / 640) +
-				(p2 - p0) * (f32(y + tc.yStart) / 640)
-			ray.D = la.normalize(pixelPos - ray.O)
-			ray.t = MAX_F32
-			b, t := intersectBVH(ray, rootNodeIdx)
-			if ray.t < MAX_F32 do tc.Pixels[{x, y}] = ray.t
-		}
+	for &ray,i in tc.rays {
+		b, t := intersectBVH(&ray, rootNodeIdx)
+		if ray.t < MAX_F32 do tc.Pixels[{uint(i)%tc.xLen, uint(i)/tc.xLen}] = ray.t
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
@@ -176,7 +191,7 @@ intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return bvhIterations, triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			intersectTri(ray, tri[triIdx[bvhNode[nodeIdx].leftFirst + i]])
+			intersectTri(ray, tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]])
 			triIterations += 1
 		}
 	} else {
@@ -227,7 +242,7 @@ intersectTri :: proc(ray: ^Ray, tri: Tri) {
 BuildBVH :: proc() {
 	for &t, i in tri {
 		t.centroid = (t.vertex0 + t.vertex1 + t.vertex2) / 3
-		triIdx[i] = uint(i)
+		shapeIdx[i] = uint(i)
 	}
 	bvhNode[rootNodeIdx].triCount = N
 	UpdateNodeBounds(rootNodeIdx)
@@ -238,7 +253,7 @@ UpdateNodeBounds :: proc(nodeIdx: uint) {
 	bvhNode[nodeIdx].aabbMin = {MAX_F32, MAX_F32, MAX_F32}
 	bvhNode[nodeIdx].aabbMax = {-MAX_F32, -MAX_F32, -MAX_F32}
 	for i in 0 ..< bvhNode[nodeIdx].triCount {
-		UpdateTriangleAABB(&bvhNode[nodeIdx], tri[triIdx[bvhNode[nodeIdx].leftFirst + i]])
+		UpdateTriangleAABB(&bvhNode[nodeIdx], tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]])
 	}
 }
 
@@ -263,10 +278,10 @@ Subdivide :: proc(nodeIdx: uint) {
 	i := int(bvhNode[nodeIdx].leftFirst)
 	j := i + int(bvhNode[nodeIdx].triCount) - 1
 	for i <= j {
-		if tri[triIdx[i]].centroid[axis] < splitPos {
+		if tri[shapeIdx[i]].centroid[axis] < splitPos {
 			i += 1
 		} else {
-			swap(&triIdx[i], &triIdx[j])
+			swap(&shapeIdx[i], &shapeIdx[j])
 			j -= 1
 		}
 	}
@@ -302,17 +317,12 @@ fmaxf :: proc(first, second: fl3) -> fl3 {
 	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
 }
 
-BVHNode :: struct {
-	//total size 32 bytes
-	aabbMin, aabbMax:    fl3, //12 bytes each
-	leftFirst, triCount: uint, //4 bytes each
-}
-
 buildTestTriangles :: proc() {
+	rand.reset(12345678910)
 	rf := rand.float32_uniform
 	// Create N random triangles and populate the arrays
 	// triIdx is a lookup table to avoid moving the data in the tri array.
-	for &t, i in triIdx {
+	for &t, i in shapeIdx {
 		triangle := Tri{}
 		r0 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
 		r1 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}

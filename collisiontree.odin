@@ -93,6 +93,7 @@ main :: proc() {
 		yStart: uint = 0
 		xStart: uint = 0
 		searchTime = 0
+		remaining = 640
 		for runner, i in runners {
 			// tc := &contexts[i]
 			contexts[i].ray.O = camPos
@@ -114,11 +115,12 @@ main :: proc() {
 		}
 		searchTime += processThreadOutput(&pool)
 		rl.DrawFPS(10, 10)
-		rl.DrawText(fmt.ctprintf("Total search time: %v", searchTime), 10, 40, 16, {0, 0, 0, 255})
+		rl.DrawText(fmt.ctprintf("cumulative search time: %v\naverage search time: %v", searchTime,searchTime / time.Duration(num_CPU)), 10, 40, 16, {0, 0, 0, 255})
 		rl.EndDrawing()
-		fmt.printfln("cumulative search time: %v", searchTime)
-		fmt.printfln("average search time: %v", searchTime / time.Duration(num_CPU))
+		// fmt.printfln("cumulative search time: %v", searchTime)
+		// fmt.printfln("average search time: %v", searchTime / time.Duration(num_CPU))
 	}
+	thread.pool_shutdown(&pool)
 	fmt.printfln("Did we actually mean to close? %v", rl.WindowShouldClose())
 }
 
@@ -147,6 +149,7 @@ threadScan :: proc(task: thread.Task) {
 	p2 := fl3{-1, -1, -15}
 	ray := &tc.ray
 	tc.searchTime = 0
+	// fmt.printfln("bvh size: %v, start: (%v,%v), end: (%v,%v)",len(bvhNode),tc.xStart,tc.yStart,tc.xStart+tc.xLen-1,tc.yStart+tc.yLen-1)
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	for y in 0 ..< uint(tc.yLen) {
@@ -163,7 +166,7 @@ threadScan :: proc(task: thread.Task) {
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
-	fmt.printfln("pixel len: %v, in thread: %v", len(tc.Pixels), task.user_index)
+	// fmt.printfln("pixel len: %v, in thread: %v", len(tc.Pixels), task.user_index)
 }
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object

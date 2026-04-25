@@ -12,7 +12,7 @@ import time "core:time"
 import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
-N :: 64
+N :: 1024
 scanSize: uint
 
 fl3 :: [3]f32
@@ -131,7 +131,7 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 		tc := cast(^ThreadContext)task.data
 		for key, value in tc.Pixels {
 			rl.DrawPixelV(
-				{f32(tc.xStart + key.x) * 320 + 320, f32(tc.yStart + key.y) * 320 + 320},
+				{f32(tc.xStart + key.x), f32(tc.yStart + key.y)},
 				{u8(value * value), 200, 255, 255},
 			)
 		}

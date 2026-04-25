@@ -5,13 +5,18 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:mem/virtual"
+import os "core:os"
+import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
+scanSize: uint
 
 fl3 :: [3]f32
+ui2 :: [2]uint
 
 Tri :: struct {
 	vertex0, vertex1, vertex2, centroid: fl3,
@@ -22,109 +27,165 @@ Ray :: struct {
 	t:    f32,
 }
 
+ThreadContext :: struct {
+	ray:                        Ray,
+	searchTime:                 time.Duration,
+	xStart, yStart, xLen, yLen: uint,
+	Pixels:                     map[ui2]f32,
+	bvhTree:                    []BVHNode,
+}
+
+TaskRunner :: struct {
+	allocator: mem.Allocator,
+	task:      proc(_: thread.Task),
+}
+
 tri := [N]Tri{}
 triIdx := [N]uint{}
-bvhNode := [N * 2]BVHNode{}
+bvhNode := [N * 2]BVHNode{} //N 64 byte pages for optimal loading
 rootNodeIdx, nodesUsed: uint = 0, 2
+num_CPU: int
+remaining: uint
+dyn_pool: mem.Dynamic_Pool
+pool_allocator: mem.Allocator
+runners: [dynamic]TaskRunner
+contexts: [dynamic]ThreadContext
 
 
 main :: proc() {
-	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, context.allocator)
-	defer mem.dynamic_arena_destroy(&arena)
-
-
-	rf := rand.float32_uniform
-	// Create N random triangles and populate the arrays
-	// triIdx is a lookup table to avoid moving the data in the tri array.
-	for &t, i in triIdx {
-		triangle := Tri{}
-		r0 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		r1 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		r2 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		triangle.vertex0 = r0 * 9 - fl3{5, 5, 5}
-		triangle.vertex1 = triangle.vertex0 + r1 * 2
-		triangle.vertex2 = triangle.vertex0 + r2 * 2
-		tri[i] = triangle
+	mem.dynamic_pool_init(&dyn_pool)
+	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
+	//defer mem.dynamic_pool_destroy(&dyn_pool)
+	num_CPU = os.get_processor_core_count()
+	remaining = 640
+	scanSize = remaining / uint(num_CPU)
+	runners = make([dynamic]TaskRunner, num_CPU, num_CPU)
+	contexts = make([dynamic]ThreadContext, num_CPU, num_CPU)
+	for &r in runners {
+		a: mem.Arena
+		mem.arena_init(&a, new([64]byte)[:])
+		r.task = threadScan
+		r.allocator = mem.arena_allocator(&a)
 	}
+
+	buildTestTriangles()
+
+	bWatch := time.Stopwatch{}
+	time.stopwatch_start(&bWatch)
+	BuildBVH()
+	time.stopwatch_stop(&bWatch)
+
 	rl.InitWindow(640, 640, "test")
+	defer rl.CloseWindow()
+
+	searchTime: time.Duration
+	camPos := fl3{0, 0, -18}
+
+	pool: thread.Pool
+	thread.pool_init(&pool, pool_allocator, num_CPU)
+	defer thread.pool_destroy(&pool)
+	thread.pool_start(&pool)
+	for !rl.WindowShouldClose() {
+		// defer mem.dynamic_pool_free_all(&dyn_pool)
+		fmt.println("start of frame")
+		rl.BeginDrawing()
+		rl.ClearBackground(rl.WHITE)
+		yStart: uint = 0
+		xStart: uint = 0
+		searchTime = 0
+		for runner, i in runners {
+			// tc := &contexts[i]
+			contexts[i].ray.O = camPos
+			contexts[i].xStart = xStart
+			contexts[i].yStart = yStart
+			contexts[i].yLen = 640
+			contexts[i].xLen = math.min(scanSize, remaining)
+			contexts[i].bvhTree = bvhNode[:]
+			remaining -= contexts[i].xLen
+			xStart += contexts[i].xLen
+			contexts[i].Pixels = make(map[ui2]f32)
+			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i)
+		}
+		fmt.printfln("starting pool: %v", thread.pool_num_outstanding(&pool))
+
+		for thread.pool_num_outstanding(&pool) > 0 {
+			// fmt.printf("| %v", thread.pool_num_outstanding(&pool))
+			searchTime += processThreadOutput(&pool)
+		}
+		searchTime += processThreadOutput(&pool)
+		rl.DrawFPS(10, 10)
+		rl.DrawText(fmt.ctprintf("Total search time: %v", searchTime), 10, 40, 16, {0, 0, 0, 255})
+		rl.EndDrawing()
+		fmt.printfln("cumulative search time: %v", searchTime)
+		fmt.printfln("average search time: %v", searchTime / time.Duration(num_CPU))
+	}
+	fmt.printfln("Did we actually mean to close? %v", rl.WindowShouldClose())
+}
+
+processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
+	task, ok := thread.pool_pop_done(pool)
+	if ok {
+		fmt.printfln("drawing thread %v results", task.user_index)
+		tc := cast(^ThreadContext)task.data
+		for key, value in tc.Pixels {
+			rl.DrawPixelV(
+				{f32(tc.xStart + key.x) * 320 + 320, f32(tc.yStart + key.y) * 320 + 320},
+				{u8(value * value), 200, 255, 255},
+			)
+		}
+		return tc.searchTime
+	}
+	return 0
+}
+
+threadScan :: proc(task: thread.Task) {
+	// defer mem.free_all(task.allocator)
+	tc := cast(^ThreadContext)task.data
 	camPos := fl3{0, 0, -18}
 	p0 := fl3{-1, 1, -15}
 	p1 := fl3{1, 1, -15}
 	p2 := fl3{-1, -1, -15}
-	BuildBVH()
-	defer rl.CloseWindow()
-	ray := Ray{}
-	pixelPos: fl3
-	context.allocator = mem.dynamic_arena_allocator(&arena)
-	searchWatch := time.Stopwatch{}
-	drawWatch:= time.Stopwatch{}
-	searchTime, drawTime: time.Duration
-	bIter,tIter,b,t:uint
-	for !rl.WindowShouldClose() {
-		defer mem.dynamic_arena_free_all(&arena)
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.WHITE)
-		ray.O = camPos
-		time.stopwatch_reset(&searchWatch)
-		time.stopwatch_reset(&drawWatch)
-		bIter=0
-		tIter=0
-		for y in 0 ..< 640/2 {
-			for x in 0 ..< 640/2 {
-				pixelPos = p0 + (p1 - p0) * (f32(x*2) / 640) + (p2 - p0) * (f32(y*2) / 640)
-				ray.D = la.normalize(pixelPos - ray.O)
-				ray.t = MAX_F32
-				time.stopwatch_start(&searchWatch)
-				b,t=intersectBVH(&ray, rootNodeIdx)
-				time.stopwatch_stop(&searchWatch)
-				bIter+=b
-				tIter+=t
-				if ray.t > 0 && ray.t < MAX_F32 {
-					// not a fast function, but with a stable data set, it should give a consistent impact on FPS, not a scaling one.
-					time.stopwatch_start(&drawWatch)
-					rl.DrawPixelV(
-						{pixelPos.x * 320 + 320, pixelPos.y * 320 + 320},
-						{u8(ray.t * ray.t), 200, 255, 255},
-					)
-					time.stopwatch_stop(&drawWatch)
-				}
-				
-			}
+	ray := &tc.ray
+	tc.searchTime = 0
+	sw := time.Stopwatch{}
+	time.stopwatch_start(&sw)
+	for y in 0 ..< uint(tc.yLen) {
+		for x in 0 ..< uint(tc.xLen) {
+			pixelPos :=
+				p0 +
+				(p1 - p0) * (f32(x + tc.xStart) / 640) +
+				(p2 - p0) * (f32(y + tc.yStart) / 640)
+			ray.D = la.normalize(pixelPos - ray.O)
+			ray.t = MAX_F32
+			b, t := intersectBVH(ray, rootNodeIdx)
+			if ray.t < MAX_F32 do tc.Pixels[{x, y}] = ray.t
 		}
-		rl.DrawText(
-			fmt.ctprintf("search time: %v, draw time: %v\niterations B: %v, T: %v", time.stopwatch_duration(searchWatch), time.stopwatch_duration(drawWatch),bIter,tIter),
-			10,
-			30,
-			16,
-			{10, 10, 10, 255},
-		)
-		rl.DrawFPS(10, 10)
-		rl.EndDrawing()
 	}
-
+	time.stopwatch_stop(&sw)
+	tc.searchTime = time.stopwatch_duration(sw)
+	fmt.printfln("pixel len: %v, in thread: %v", len(tc.Pixels), task.user_index)
 }
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
-intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint,uint) {
+intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	bvhIterations := uint(1)
-	triIterations:= uint(0)
-	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return bvhIterations,triIterations
+	triIterations := uint(0)
+	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabbMin, bvhNode[nodeIdx].aabbMax) do return bvhIterations, triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
 			intersectTri(ray, tri[triIdx[bvhNode[nodeIdx].leftFirst + i]])
-			triIterations+=1
+			triIterations += 1
 		}
 	} else {
-		b,t: uint
-		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst)
-		bvhIterations+=b
-		triIterations+=t
-		b,t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst + 1)
-		bvhIterations+=b
-		triIterations+=t
+		b, t: uint
+		b, t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst)
+		bvhIterations += b
+		triIterations += t
+		b, t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst + 1)
+		bvhIterations += b
+		triIterations += t
 	}
-	return bvhIterations,triIterations
+	return bvhIterations, triIterations
 }
 
 IntersectAABB :: proc(ray: Ray, bmin, bmax: fl3) -> bool {
@@ -161,9 +222,9 @@ intersectTri :: proc(ray: ^Ray, tri: Tri) {
 }
 
 BuildBVH :: proc() {
-	for &t,i in tri {
+	for &t, i in tri {
 		t.centroid = (t.vertex0 + t.vertex1 + t.vertex2) / 3
-		triIdx[i]=uint(i)
+		triIdx[i] = uint(i)
 	}
 	bvhNode[rootNodeIdx].triCount = N
 	UpdateNodeBounds(rootNodeIdx)
@@ -239,6 +300,23 @@ fmaxf :: proc(first, second: fl3) -> fl3 {
 }
 
 BVHNode :: struct {
-	aabbMin, aabbMax:                fl3,
-	leftFirst, triCount: uint,
+	//total size 32 bytes
+	aabbMin, aabbMax:    fl3, //12 bytes each
+	leftFirst, triCount: uint, //4 bytes each
+}
+
+buildTestTriangles :: proc() {
+	rf := rand.float32_uniform
+	// Create N random triangles and populate the arrays
+	// triIdx is a lookup table to avoid moving the data in the tri array.
+	for &t, i in triIdx {
+		triangle := Tri{}
+		r0 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
+		r1 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
+		r2 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
+		triangle.vertex0 = r0 * 9 - fl3{5, 5, 5}
+		triangle.vertex1 = triangle.vertex0 + r1 * 2
+		triangle.vertex2 = triangle.vertex0 + r2 * 2
+		tri[i] = triangle
+	}
 }

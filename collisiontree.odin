@@ -8,6 +8,8 @@ import "core:mem"
 import os "core:os"
 import "core:thread"
 import time "core:time"
+import "core:strings"
+import "core:strconv"
 import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
@@ -45,9 +47,9 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-tri := [N]Tri{}
-shapeIdx := [N]uint{}
-bvhNode := [N * 2]BVHNode{} //N 64 byte pages for optimal loading
+tri : [dynamic]Tri
+shapeIdx : [dynamic]uint
+bvhNode : [dynamic]BVHNode //N 64 byte pages for optimal loading
 rootNodeIdx, nodesUsed: uint = 0, 2
 num_CPU: int
 remaining: uint
@@ -73,7 +75,7 @@ main :: proc() {
 		r.allocator = mem.arena_allocator(&a)
 	}
 
-	buildTestTriangles()
+	buildTestTriangles2()
 
 	bWatch := time.Stopwatch{}
 	time.stopwatch_start(&bWatch)
@@ -83,10 +85,10 @@ main :: proc() {
 	rl.InitWindow(640, 640, "test")
 	defer rl.CloseWindow()
 	searchTime: time.Duration
-	camPos := fl3{0, 0, -18}
-	p0 := fl3{-1, 1, -15}
-	p1 := fl3{1, 1, -15}
-	p2 := fl3{-1, -1, -15}
+	camPos := fl3{0, 0, -7}
+	p0 := fl3{-1, 1, -4}
+	p1 := fl3{1, 1, -4}
+	p2 := fl3{-1, -1, -4}
 	pool: thread.Pool
 	thread.pool_init(&pool, pool_allocator, num_CPU)
 	defer thread.pool_destroy(&pool)
@@ -133,11 +135,13 @@ main :: proc() {
 		rl.DrawFPS(10, 10)
 		rl.DrawText(
 			fmt.ctprintf(
-				"build time: %v\ncumulative search time: %v\naverage search time: %v\n409,600 rays across %v threads",
+				"build time: %v\ncumulative search time: %v\naverage search time: %v\n409,600 rays across %v threads\ntriangles: %v\nTPR: %v",
 				time.stopwatch_duration(bWatch),
 				searchTime,
 				searchTime / time.Duration(num_CPU),
 				num_CPU,
+				len(tri),
+				searchTime/(640*640)
 			),
 			10,
 			40,
@@ -158,9 +162,10 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 		// fmt.printfln("drawing thread %v results", task.user_index)
 		tc := cast(^ThreadContext)task.data
 		for key, value in tc.Pixels {
+			v:=470-value*43
 			rl.DrawPixelV(
 				{f32(tc.xStart + key.x), f32(tc.yStart + key.y)},
-				{u8(value * value), 200, 255, 255},
+				{v, v, v, 255},
 			)
 		}
 		return tc.searchTime
@@ -318,6 +323,8 @@ fmaxf :: proc(first, second: fl3) -> fl3 {
 }
 
 buildTestTriangles :: proc() {
+	tri = make([dynamic]Tri)
+	shapeIdx = make([dynamic]uint)
 	rand.reset(12345678910)
 	rf := rand.float32_uniform
 	// Create N random triangles and populate the arrays
@@ -332,4 +339,34 @@ buildTestTriangles :: proc() {
 		triangle.vertex2 = triangle.vertex0 + r2 * 2
 		tri[i] = triangle
 	}
+}
+
+buildTestTriangles2 :: proc() {
+	data, err := os.read_entire_file("assets/unity.tri", context.allocator)
+	// assert(err==nil)
+	defer delete(data, context.allocator)
+	iterator := string(data)
+	pointList := make([dynamic]f32, 9, 9)
+	tri = make([dynamic]Tri)
+	shapeIdx = make([dynamic]uint)
+	i := 0
+	for line in strings.split_lines_iterator(&iterator) {
+		vals: []string
+		vals, err = strings.split(line, " ")
+		for v, j in vals {
+			pointList[j], _ = strconv.parse_f32(v)
+		}
+		append(
+			&tri,
+			Tri {
+				{pointList[0], pointList[1], pointList[2]},
+				{pointList[3], pointList[4], pointList[5]},
+				{pointList[6], pointList[7], pointList[8]},
+				{},
+			},
+		)
+		append(&shapeIdx, uint(i))
+		i += 1
+	}
+	bvhNode = make([dynamic]BVHNode, i * i, i * i, context.allocator)
 }

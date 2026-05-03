@@ -11,6 +11,7 @@ import "core:strings"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
+import "base:runtime"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
@@ -19,7 +20,7 @@ scanSize: uint
 fl3 :: [3]f32
 ui2 :: [2]uint
 
-AABB :: struct {
+AABB :: struct #align(4){
 	upper, lower: fl3,
 }
 
@@ -42,18 +43,17 @@ Ray :: struct {
 	t:    f32,
 }
 
-BVHNode :: struct {
+BVHNode :: struct #align(4){
 	aabb:                AABB, //3d bounds
 	leftFirst, triCount: uint,
 	//total size 32 bytes
 }
 
 ThreadContext :: struct {
-	rays:                       []Ray,
-	searchTime:                 time.Duration,
 	xStart, yStart, xLen, yLen: uint,
+	searchTime:                 time.Duration,
+	rays:                       []Ray,
 	Pixels:                     map[ui2]f32,
-	bvhTree:                    []BVHNode,
 }
 
 TaskRunner :: struct {
@@ -69,6 +69,7 @@ num_CPU: int
 remaining: uint
 dyn_pool: mem.Dynamic_Pool
 pool_allocator: mem.Allocator
+pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
 
@@ -85,12 +86,12 @@ main :: proc() {
 	contexts = make([dynamic]ThreadContext, num_CPU, num_CPU)
 	for &r in runners {
 		a: mem.Arena
-		mem.arena_init(&a, new([64]byte)[:])
+		mem.arena_init(&a, new([128]byte)[:])
 		r.task = threadScan
 		r.allocator = mem.arena_allocator(&a)
 	}
 	fmt.println("Bulding Test Triangles")
-	inputTri := buildTestTriangles2()
+	inputTri := buildTestTriangles()
 	fmt.println("triangles built")
 	bWatch := time.Stopwatch{}
 	fmt.println("Building BVH")
@@ -106,7 +107,6 @@ main :: proc() {
 	p0 := fl3{-2.5, .8, -.5}
 	p1 := fl3{-.5, .8, -.5}
 	p2 := fl3{-2.5, -1.2, -.5}
-	pool: thread.Pool
 	thread.pool_init(&pool, pool_allocator, num_CPU)
 	defer thread.pool_destroy(&pool)
 	thread.pool_start(&pool)
@@ -131,12 +131,11 @@ main :: proc() {
 				ray.D = la.normalize(
 					(p0 +
 						(p1 - p0) * (f32(x + xStart) / 640) +
-						(p2 - p0) * (f32(y + yStart) / 640)) -
-					ray.O,
+						(p2 - p0) * (f32(y + yStart) / 640)
+					) - ray.O,
 				)
 				ray.t = MAX_F32
 			}
-			contexts[i].bvhTree = bvhNode[:]
 			remaining -= contexts[i].xLen
 			xStart += contexts[i].xLen
 			contexts[i].Pixels = make(map[ui2]f32)
@@ -166,6 +165,17 @@ main :: proc() {
 	}
 	thread.pool_shutdown(&pool)
 }
+
+beginRayIntersections::proc(rays:..Ray){
+	//build tasks
+	//start tasks
+}
+
+beginShapeIntersections::proc(shapes:..Shape){
+	//build tasks
+}
+
+allIntersectionsComplete::proc()->bool{return thread.pool_num_outstanding(&pool)==0}
 
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 	task, ok := thread.pool_pop_done(pool)
@@ -243,7 +253,7 @@ BuildBVH :: proc(inputTri: []^Shape) {
 	tri = inputTri
 	length := len(tri)
 	shapeIdx = make([]uint, length)
-	bvhNode = make([]BVHNode, 2 * length)
+	bvhNode = runtime.make_aligned([]BVHNode, 2 * length,64)
 	for &t, i in tri {
 		shapeIdx[i] = uint(i)
 	}

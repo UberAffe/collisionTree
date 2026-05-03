@@ -1,5 +1,6 @@
 package collisiontree
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
@@ -11,7 +12,6 @@ import "core:strings"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
-import "base:runtime"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
@@ -20,7 +20,7 @@ scanSize: uint
 fl3 :: [3]f32
 ui2 :: [2]uint
 
-AABB :: struct #align(4){
+AABB :: struct #align (4) {
 	upper, lower: fl3,
 }
 
@@ -43,7 +43,7 @@ Ray :: struct {
 	t:    f32,
 }
 
-BVHNode :: struct #align(4){
+BVHNode :: struct #align (4) {
 	aabb:                AABB, //3d bounds
 	leftFirst, triCount: uint,
 	//total size 32 bytes
@@ -91,7 +91,7 @@ main :: proc() {
 		r.allocator = mem.arena_allocator(&a)
 	}
 	fmt.println("Bulding Test Triangles")
-	inputTri := buildTestTriangles()
+	inputTri := buildTestTriangles2()
 	fmt.println("triangles built")
 	bWatch := time.Stopwatch{}
 	fmt.println("Building BVH")
@@ -123,6 +123,7 @@ main :: proc() {
 			contexts[i].yStart = yStart
 			contexts[i].yLen = 640
 			contexts[i].xLen = math.min(scanSize, remaining)
+			delete(contexts[i].rays)
 			contexts[i].rays = make([]Ray, contexts[i].xLen * contexts[i].yLen)
 			for &ray, j in contexts[i].rays {
 				y := uint(j) / contexts[i].xLen
@@ -131,13 +132,14 @@ main :: proc() {
 				ray.D = la.normalize(
 					(p0 +
 						(p1 - p0) * (f32(x + xStart) / 640) +
-						(p2 - p0) * (f32(y + yStart) / 640)
-					) - ray.O,
+						(p2 - p0) * (f32(y + yStart) / 640)) -
+					ray.O,
 				)
 				ray.t = MAX_F32
 			}
 			remaining -= contexts[i].xLen
 			xStart += contexts[i].xLen
+			delete(contexts[i].Pixels)
 			contexts[i].Pixels = make(map[ui2]f32)
 			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i)
 		}
@@ -166,16 +168,16 @@ main :: proc() {
 	thread.pool_shutdown(&pool)
 }
 
-beginRayIntersections::proc(rays:..Ray){
+beginRayIntersections :: proc(rays: ..Ray) {
 	//build tasks
 	//start tasks
 }
 
-beginShapeIntersections::proc(shapes:..Shape){
+beginShapeIntersections :: proc(shapes: ..Shape) {
 	//build tasks
 }
 
-allIntersectionsComplete::proc()->bool{return thread.pool_num_outstanding(&pool)==0}
+allIntersectionsComplete :: proc() -> bool {return thread.pool_num_outstanding(&pool) == 0}
 
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 	task, ok := thread.pool_pop_done(pool)
@@ -198,25 +200,26 @@ threadScan :: proc(task: thread.Task) {
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	for &ray, i in tc.rays {
-		b, t := intersectBVH(&ray, rootNodeIdx)
+		b, t := intersectBVH(&ray)
 		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
 }
 
+intersectBVH :: proc {
+	intersectBVHRecursive,
+	intersectBVHLoop,
+}
+
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
-intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
+intersectBVHRecursive :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
-	if !IntersectAABB(ray^, bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
+	if !_intersectAABBBool(ray^, bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			s := tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]
-			switch type in s.type {
-			case Tri:
-				_intersectTri(type, ray)
-			}
+			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^,ray)
 			triIterations += 1
 		}
 	} else {
@@ -230,8 +233,60 @@ intersectBVH :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	}
 	return bvhIterations, triIterations
 }
+intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
+	bvhIterations := uint(1)
+	triIterations := uint(0)
+	node := &bvhNode[rootNodeIdx]
+	idStack := make([dynamic]^BVHNode)
+	delete_dynamic_array(idStack)
+	for {
+		if (isLeaf(node^)) {
+			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^,ray)
+			triIterations+=node.triCount
+			if len(idStack) == 0 do break
+			node = pop(&idStack)
+		}
+		child1 := &bvhNode[node.leftFirst]
+		child2 := &bvhNode[node.leftFirst+1]
+		// dist1 := _intersectAABBFloat(ray^, child1.aabb)
+		// dist2 := _intersectAABBFloat(ray^, child2.aabb)
+		b1 := _intersectAABBBool(ray^,child1.aabb)
+		b2:=_intersectAABBBool(ray^,child2.aabb)
+		bvhIterations+=2
+		if b1{
+			node=child1
+			if b2{
+				append(&idStack,child2)
+			}
+		}else if b2{
+			node = child2
+		} else{
+			if len(&idStack)==0 do break
+			node=pop(&idStack)
+		}
+		// if dist1 > dist2 {
+		// 	swap(&dist1, &dist2)
+		// 	swap(&child1, &child2)
+		// }
+		// if dist1 == MAX_F32 {
+		// 	if len(idStack) == 0 do break
+		// 	node = pop(&idStack)
+		// } else {
+		// 	node = child1
+		// 	if dist2 != MAX_F32 do append(&idStack, child2)
+		// }
+	}
+	return bvhIterations, triIterations
+}
 
-IntersectAABB :: proc(ray: Ray, b: AABB) -> bool {
+intersectShape :: proc(shape: Shape, ray:^Ray) {
+	switch type in shape.type {
+	case Tri:
+		_intersectTri(type, ray)
+	}
+}
+
+_intersectAABBBool :: proc(ray: Ray, b: AABB) -> bool {
 	bmin := b.lower
 	bmax := b.upper
 	tx1 := (bmin.x - ray.O.x) / ray.D.x
@@ -248,12 +303,29 @@ IntersectAABB :: proc(ray: Ray, b: AABB) -> bool {
 	tmax = min(tmax, max(tx1, tx2))
 	return tmax >= tmin && tmin < ray.t && tmax > 0
 }
+_intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
+	bmin := b.lower
+	bmax := b.upper
+	tx1 := (bmin.x - ray.O.x) / ray.D.x
+	tx2 := (bmax.x - ray.O.x) / ray.D.x
+	tmin := min(tx1, tx2)
+	tmax := max(tx1, tx2)
+	ty1 := (bmin.y - ray.O.y) / ray.D.y
+	ty2 := (bmax.y - ray.O.y) / ray.D.y
+	tmin = max(tmin, min(ty1, ty2))
+	tmax = min(tmax, max(ty1, ty2))
+	tz1 := (bmin.z - ray.O.z) / ray.D.z
+	tz2 := (bmax.z - ray.O.z) / ray.D.z
+	tmin = max(tmin, min(tx1, tx2))
+	tmax = min(tmax, max(tx1, tx2))
+	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
+}
 
 BuildBVH :: proc(inputTri: []^Shape) {
 	tri = inputTri
 	length := len(tri)
 	shapeIdx = make([]uint, length)
-	bvhNode = runtime.make_aligned([]BVHNode, 2 * length,64)
+	bvhNode = runtime.make_aligned([]BVHNode, 2 * length, 64)
 	for &t, i in tri {
 		shapeIdx[i] = uint(i)
 	}
@@ -271,9 +343,18 @@ UpdateNodeBounds :: proc(nodeIdx: uint) {
 	}
 }
 
-GrowAABB :: proc(node: ^BVHNode, leaf: AABB) {
+GrowAABB :: proc {
+	_growAABBWithBox,
+	_growAABBWithNode,
+}
+
+_growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
 	node.aabb.lower = fminf(node.aabb.lower, leaf.lower)
 	node.aabb.upper = fmaxf(node.aabb.upper, leaf.upper)
+}
+_growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
+	node.lower = fminf(node.lower, leaf.lower)
+	node.upper = fmaxf(node.upper, leaf.upper)
 }
 
 Subdivide :: proc(nodeIdx: uint) {
@@ -281,15 +362,33 @@ Subdivide :: proc(nodeIdx: uint) {
 	if bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
 	extent := bvhNode[nodeIdx].aabb.upper - bvhNode[nodeIdx].aabb.lower
-	axis := 0
-	if extent.y > extent.x do axis = 1
-	if extent.z > extent[axis] do axis = 2
-	splitPos := bvhNode[nodeIdx].aabb.lower[axis] + extent[axis] * .5
+	parentCost :=
+		f32(bvhNode[nodeIdx].triCount) *
+		(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
+	// axis := 0
+	// if extent.y > extent.x do axis = 1
+	// if extent.z > extent[axis] do axis = 2
+	// splitPos := bvhNode[nodeIdx].aabb.lower[axis] + extent[axis] * .5
+	bestAxis := -1
+	bestPos, bestCost: f32 = 0, MAX_F32
+	for axis in 0 ..< 3 {
+		for i in 0 ..< bvhNode[nodeIdx].triCount {
+			shape := tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]
+			candidatePos := shape.centroid[axis]
+			cost := evaluateSAH(&bvhNode[nodeIdx], axis, candidatePos)
+			if (cost < bestCost) {
+				bestPos = candidatePos
+				bestCost = cost
+				bestAxis = axis
+			}
+		}
+	}
+	if bestCost >= parentCost do return
 	//in place partition
 	i := int(bvhNode[nodeIdx].leftFirst)
 	j := i + int(bvhNode[nodeIdx].triCount) - 1
 	for i <= j {
-		if tri[shapeIdx[i]].centroid[axis] < splitPos {
+		if tri[shapeIdx[i]].centroid[bestAxis] < bestPos {
 			i += 1
 		} else {
 			swap(&shapeIdx[i], &shapeIdx[j])
@@ -316,10 +415,35 @@ Subdivide :: proc(nodeIdx: uint) {
 	Subdivide(rightChildIdx)
 }
 
-swap :: proc(first, second: ^uint) {
+evaluateSAH :: proc(node: ^BVHNode, axis: int, pos: f32) -> f32 {
+	leftBox, rightBox: AABB
+	leftCount, rightCount: f32 = 0, 0
+	for i in 0 ..< node.triCount {
+		shape := tri[shapeIdx[node.leftFirst + i]]
+		if shape.centroid[axis] < pos {
+			leftCount += 1
+			GrowAABB(&leftBox, shape.aabb)
+		} else {
+			rightCount += 1
+			GrowAABB(&rightBox, shape.aabb)
+		}
+	}
+	cost := leftCount * areaAABB(leftBox) + rightCount * areaAABB(rightBox)
+	return cost > 0 ? cost : MAX_F32
+}
+
+areaAABB :: proc(aabb: AABB) -> f32 {
+	e := aabb.upper - aabb.lower
+	return e.x * e.y + e.y * e.z + e.z * e.x
+}
+
+swap :: proc(first, second: ^$T) {
 	t := first^
 	first^ = second^
 	second^ = t
+}
+isLeaf :: proc(node: BVHNode) -> bool {
+	return node.triCount > 0
 }
 fminf :: proc(first, second: fl3) -> fl3 {
 	return {min(first.x, second.x), min(first.y, second.y), min(first.z, second.z)}
@@ -341,9 +465,9 @@ buildTestTriangles :: proc() -> []^Shape {
 		triangle.vertex1 = triangle.vertex0 + r1 * 2
 		triangle.vertex2 = triangle.vertex0 + r2 * 2
 		input[i] = new(Shape)
-		input[i].aabb=_getTriangleAABB(triangle)
-		input[i].type=triangle
-		input[i].centroid=(triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
+		input[i].aabb = _getTriangleAABB(triangle)
+		input[i].type = triangle
+		input[i].centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
 	}
 	return input
 }
@@ -365,17 +489,17 @@ buildTestTriangles2 :: proc() -> []^Shape {
 			{pointList[3], pointList[4], pointList[5]},
 			{pointList[6], pointList[7], pointList[8]},
 		}
-		s:= new(Shape)
+		s := new(Shape)
 		s.centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
 		s.aabb = _getTriangleAABB(triangle)
-		s.type=triangle
+		s.type = triangle
 		append(&input, s)
 	}
 	return input[:]
 }
 
 _getTriangleAABB :: proc(leaf: Tri) -> AABB {
-	bounds: AABB = {{MAX_F32, MAX_F32, MAX_F32}, {-MAX_F32, -MAX_F32, -MAX_F32}}
+	bounds: AABB = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
 	bounds.lower = fminf(bounds.lower, leaf.vertex0)
 	bounds.lower = fminf(bounds.lower, leaf.vertex1)
 	bounds.lower = fminf(bounds.lower, leaf.vertex2)

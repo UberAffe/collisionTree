@@ -219,7 +219,7 @@ intersectBVHRecursive :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	if !_intersectAABBBool(ray^, bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^,ray)
+			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^, ray)
 			triIterations += 1
 		}
 	} else {
@@ -241,45 +241,47 @@ intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
 	delete_dynamic_array(idStack)
 	for {
 		if (isLeaf(node^)) {
-			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^,ray)
-			triIterations+=node.triCount
+			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^, ray)
+			triIterations += node.triCount
 			if len(idStack) == 0 do break
 			node = pop(&idStack)
 		}
 		child1 := &bvhNode[node.leftFirst]
-		child2 := &bvhNode[node.leftFirst+1]
-		// dist1 := _intersectAABBFloat(ray^, child1.aabb)
-		// dist2 := _intersectAABBFloat(ray^, child2.aabb)
-		b1 := _intersectAABBBool(ray^,child1.aabb)
-		b2:=_intersectAABBBool(ray^,child2.aabb)
-		bvhIterations+=2
-		if b1{
-			node=child1
-			if b2{
-				append(&idStack,child2)
-			}
-		}else if b2{
-			node = child2
-		} else{
-			if len(&idStack)==0 do break
-			node=pop(&idStack)
-		}
-		// if dist1 > dist2 {
-		// 	swap(&dist1, &dist2)
-		// 	swap(&child1, &child2)
-		// }
-		// if dist1 == MAX_F32 {
-		// 	if len(idStack) == 0 do break
-		// 	node = pop(&idStack)
-		// } else {
+		child2 := &bvhNode[node.leftFirst + 1]
+		dist1 := _intersectAABBFloat(ray^, child1.aabb)
+		dist2 := _intersectAABBFloat(ray^, child2.aabb)
+		// b1 := dist1 < MAX_F32
+		// b2 := dist2 < MAX_F32
+		// b1 := _intersectAABBBool(ray^,child1.aabb)
+		// b2:=_intersectAABBBool(ray^,child2.aabb)
+		bvhIterations += 2
+		// if b1 {
 		// 	node = child1
-		// 	if dist2 != MAX_F32 do append(&idStack, child2)
+		// 	if b2 {
+		// 		append(&idStack, child2)
+		// 	}
+		// } else if b2 {
+		// 	node = child2
+		// } else {
+		// 	if len(&idStack) == 0 do break
+		// 	node = pop(&idStack)
 		// }
+		if dist1 > dist2 {
+			swap(&dist1, &dist2)
+			swap(&child1, &child2)
+		}
+		if dist1 == MAX_F32 {
+			if len(idStack) == 0 do break
+			node = pop(&idStack)
+		} else {
+			node = child1
+			if dist2 != MAX_F32 do append(&idStack, child2)
+		}
 	}
 	return bvhIterations, triIterations
 }
 
-intersectShape :: proc(shape: Shape, ray:^Ray) {
+intersectShape :: proc(shape: Shape, ray: ^Ray) {
 	switch type in shape.type {
 	case Tri:
 		_intersectTri(type, ray)
@@ -299,8 +301,8 @@ _intersectAABBBool :: proc(ray: Ray, b: AABB) -> bool {
 	tmax = min(tmax, max(ty1, ty2))
 	tz1 := (bmin.z - ray.O.z) / ray.D.z
 	tz2 := (bmax.z - ray.O.z) / ray.D.z
-	tmin = max(tmin, min(tx1, tx2))
-	tmax = min(tmax, max(tx1, tx2))
+	tmin = max(tmin, min(tz1, tz2))
+	tmax = min(tmax, max(tz1, tz2))
 	return tmax >= tmin && tmin < ray.t && tmax > 0
 }
 _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
@@ -316,8 +318,8 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	tmax = min(tmax, max(ty1, ty2))
 	tz1 := (bmin.z - ray.O.z) / ray.D.z
 	tz2 := (bmax.z - ray.O.z) / ray.D.z
-	tmin = max(tmin, min(tx1, tx2))
-	tmax = min(tmax, max(tx1, tx2))
+	tmin = max(tmin, min(tz1, tz2))
+	tmax = min(tmax, max(tz1, tz2))
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 

@@ -199,10 +199,20 @@ threadScan :: proc(task: thread.Task) {
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
+	tb: uint = 0
+	tt: uint = 0
 	for &ray, i in tc.rays {
-		b, t := intersectBVH(&ray)
+		b, t: uint
+		if task.user_index>=8 {
+			b, t = intersectBVH(&ray, rootNodeIdx)
+		} else {
+			b, t = intersectBVH(&ray)
+		}
+		tb += b
+		tt += t
 		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
 	}
+	fmt.printfln("thread %v searched %v b and %v s", task.user_index, tb, tt)
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
 }
@@ -237,8 +247,8 @@ intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
 	node := &bvhNode[rootNodeIdx]
-	idStack := make([dynamic]^BVHNode)
-	delete_dynamic_array(idStack)
+	idStack := make([dynamic]^BVHNode, 0, 64)
+	defer delete_dynamic_array(idStack)
 	for {
 		if (isLeaf(node^)) {
 			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^, ray)
@@ -250,22 +260,7 @@ intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
 		child2 := &bvhNode[node.leftFirst + 1]
 		dist1 := _intersectAABBFloat(ray^, child1.aabb)
 		dist2 := _intersectAABBFloat(ray^, child2.aabb)
-		// b1 := dist1 < MAX_F32
-		// b2 := dist2 < MAX_F32
-		// b1 := _intersectAABBBool(ray^,child1.aabb)
-		// b2:=_intersectAABBBool(ray^,child2.aabb)
 		bvhIterations += 2
-		// if b1 {
-		// 	node = child1
-		// 	if b2 {
-		// 		append(&idStack, child2)
-		// 	}
-		// } else if b2 {
-		// 	node = child2
-		// } else {
-		// 	if len(&idStack) == 0 do break
-		// 	node = pop(&idStack)
-		// }
 		if dist1 > dist2 {
 			swap(&dist1, &dist2)
 			swap(&child1, &child2)

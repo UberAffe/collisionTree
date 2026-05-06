@@ -2,6 +2,7 @@ package collisiontree
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
@@ -12,6 +13,8 @@ import "core:strings"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
+import "core:sync"
+import "../ThreadLogger"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
@@ -72,14 +75,27 @@ pool_allocator: mem.Allocator
 pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
+g_logger: log.Logger
 
 
 main :: proc() {
-	fmt.println("Collision Test Started")
+	lf, err := os.open("logs/latest.log", os.File_Flags{.Write, .Create, .Append})
+	defer os.close(lf)
+	fl:= log.create_file_logger(lf)
+	defer log.destroy_file_logger(fl)
+	g_logger=ThreadLogger.CreateThreadedLogger(fl)
+	context.logger=g_logger
+
+	log.info(fmt.println("Collision Test Started"))
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
-	//defer mem.dynamic_pool_destroy(&dyn_pool)
 	num_CPU = os.get_processor_core_count()
+	thread.pool_init(&pool, pool_allocator, num_CPU)//, thread_init, rawptr(&g_logger))
+	defer thread.pool_destroy(&pool)
+	thread.pool_start(&pool)
+	ThreadLogger.StartThreadedLogger(&pool)
+
+	num_CPU-=2
 	remaining = 640
 	scanSize = remaining / uint(num_CPU)
 	runners = make([dynamic]TaskRunner, num_CPU, num_CPU)
@@ -90,15 +106,15 @@ main :: proc() {
 		r.task = threadScan
 		r.allocator = mem.arena_allocator(&a)
 	}
-	fmt.println("Bulding Test Triangles")
+	log.info("Bulding Test Triangles")
 	inputTri := buildTestTriangles2()
-	fmt.println("triangles built")
+	log.info("triangles built")
 	bWatch := time.Stopwatch{}
-	fmt.println("Building BVH")
+	log.info("Building BVH")
 	time.stopwatch_start(&bWatch)
 	BuildBVH(inputTri)
 	time.stopwatch_stop(&bWatch)
-	fmt.println("BVH built")
+	log.info("BVH built")
 
 	rl.InitWindow(640, 640, "test")
 	defer rl.CloseWindow()
@@ -107,11 +123,9 @@ main :: proc() {
 	p0 := fl3{-2.5, .8, -.5}
 	p1 := fl3{-.5, .8, -.5}
 	p2 := fl3{-2.5, -1.2, -.5}
-	thread.pool_init(&pool, pool_allocator, num_CPU)
-	defer thread.pool_destroy(&pool)
-	thread.pool_start(&pool)
 	for !rl.WindowShouldClose() {
 		// defer mem.dynamic_pool_free_all(&dyn_pool)
+		log.info("Starting New Frame")
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		yStart: uint = 0
@@ -141,12 +155,14 @@ main :: proc() {
 			xStart += contexts[i].xLen
 			delete(contexts[i].Pixels)
 			contexts[i].Pixels = make(map[ui2]f32)
-			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i)
+			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i+2)
 		}
-		for thread.pool_num_outstanding(&pool) > 0 {
+		log.info("all tasks added")
+		for thread.pool_num_outstanding(&pool) > 1 {
 			searchTime += processThreadOutput(&pool)
 		}
 		searchTime += processThreadOutput(&pool)
+		log.info("all tasks processed.")
 		rl.DrawFPS(10, 10)
 		rl.DrawText(
 			fmt.ctprintf(
@@ -168,6 +184,22 @@ main :: proc() {
 	thread.pool_shutdown(&pool)
 }
 
+thread_init::proc(t: ^thread.Thread, ptr: rawptr){
+	newCT:=runtime.default_context()
+	dta:= runtime.Default_Temp_Allocator{}
+	runtime.default_temp_allocator_init(&dta,256)
+	newCT.temp_allocator=runtime.default_temp_allocator(&dta)
+	newCT.logger=g_logger
+	t.init_context= newCT
+	
+}
+thread_fini::proc(t:^thread.Thread,ptr:rawptr){
+	switch &ctx in t.init_context{
+		case runtime.Context:
+			runtime.default_temp_allocator_destroy(cast(^runtime.Default_Temp_Allocator)&ctx.temp_allocator)
+	}
+}
+
 beginRayIntersections :: proc(rays: ..Ray) {
 	//build tasks
 	//start tasks
@@ -182,7 +214,7 @@ allIntersectionsComplete :: proc() -> bool {return thread.pool_num_outstanding(&
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 	task, ok := thread.pool_pop_done(pool)
 	if ok {
-		// fmt.printfln("drawing thread %v results", task.user_index)
+		log.infof("drawing thread %v results", task.user_index)
 		tc := cast(^ThreadContext)task.data
 		for key, value in tc.Pixels {
 			v := u8(500 - value * 55)
@@ -194,31 +226,36 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 }
 
 threadScan :: proc(task: thread.Task) {
+	context.logger= g_logger
 	// defer mem.free_all(task.allocator)
+	// log.infof("task %v is running",task.user_index)
 	tc := cast(^ThreadContext)task.data
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	tb: uint = 0
 	tt: uint = 0
+	// log.info("test")
+	// log.infof("task %v has %v rays to process",task.user_index, len(tc.rays))
 	for &ray, i in tc.rays {
+		log.infof("task: %v, index: %v",task.user_index,i)
 		b, t: uint
-		if task.user_index>=8 {
-			b, t = intersectBVH(&ray, rootNodeIdx)
-		} else {
-			b, t = intersectBVH(&ray)
+		if task.user_index == 7 {
+			// log.info("beginning intersect loop on index 7")
+			b, t = intersectBVHLoop(&ray, i)
+			tb += b
+			tt += t
+			if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
 		}
-		tb += b
-		tt += t
-		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
 	}
-	fmt.printfln("thread %v searched %v b and %v s", task.user_index, tb, tt)
+	// log.infof("thread %v searched %v b and %v s", task.user_index, tb, tt)
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
 }
 
 intersectBVH :: proc {
 	intersectBVHRecursive,
+	intersectBVHRecursive2,
 	intersectBVHLoop,
 }
 
@@ -229,7 +266,7 @@ intersectBVHRecursive :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	if !_intersectAABBBool(ray^, bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
 	if bvhNode[nodeIdx].triCount > 0 {
 		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^, ray)
+			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^, ray, {})
 			triIterations += 1
 		}
 	} else {
@@ -243,43 +280,97 @@ intersectBVHRecursive :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	}
 	return bvhIterations, triIterations
 }
-intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
-	bvhIterations := uint(1)
+
+intersectBVHRecursive2 :: proc(ray: ^Ray, nodeIdx, alt: uint) -> (uint, uint) {
+	bvhIterations := uint(0)
 	triIterations := uint(0)
-	node := &bvhNode[rootNodeIdx]
-	idStack := make([dynamic]^BVHNode, 0, 64)
-	defer delete_dynamic_array(idStack)
-	for {
-		if (isLeaf(node^)) {
-			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^, ray)
-			triIterations += node.triCount
-			if len(idStack) == 0 do break
-			node = pop(&idStack)
+	if bvhNode[nodeIdx].triCount > 0 {
+		for i in 0 ..< bvhNode[nodeIdx].triCount {
+			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^, ray, {})
+			triIterations += 1
 		}
-		child1 := &bvhNode[node.leftFirst]
-		child2 := &bvhNode[node.leftFirst + 1]
-		dist1 := _intersectAABBFloat(ray^, child1.aabb)
-		dist2 := _intersectAABBFloat(ray^, child2.aabb)
+	} else {
+		child1 := bvhNode[nodeIdx].leftFirst
+		child2 := bvhNode[nodeIdx].leftFirst + 1
+		dist1 := _intersectAABBFloat(ray^, bvhNode[child1].aabb)
+		dist2 := _intersectAABBFloat(ray^, bvhNode[child2].aabb)
 		bvhIterations += 2
 		if dist1 > dist2 {
 			swap(&dist1, &dist2)
 			swap(&child1, &child2)
 		}
-		if dist1 == MAX_F32 {
-			if len(idStack) == 0 do break
-			node = pop(&idStack)
-		} else {
-			node = child1
-			if dist2 != MAX_F32 do append(&idStack, child2)
+		if dist1 != MAX_F32 {
+			b, t := intersectBVH(ray, child1, 2)
+			bvhIterations += b
+			triIterations += t
+			if dist2 != MAX_F32 {
+				b, t := intersectBVH(ray, child2, 2)
+				bvhIterations += b
+				triIterations += t
+			}
 		}
 	}
 	return bvhIterations, triIterations
 }
 
-intersectShape :: proc(shape: Shape, ray: ^Ray) {
+intersectBVHLoop :: proc(ray: ^Ray, index: int) -> (uint, uint) {
+	bvhIterations := uint(1)
+	triIterations := uint(0)
+	xlen: uint = 640 / 16
+	pixel := [2]uint{uint(index) % xlen, uint(index) / xlen}
+	// log.info(pixel)
+	// log.infof("p (%v,%v)", pixel.x, pixel.y)
+	if pixel.x != 6 && pixel.y != 357 do return 0, 0
+	node := bvhNode[rootNodeIdx]
+	idStack := make([dynamic]uint, 0, 64)
+	defer delete_dynamic_array(idStack)
+	i := 0
+	logs := make([dynamic]string)
+	defer delete(logs)
+	for {
+		// log.infof("iteration: %v", i)
+		if (isLeaf(node)) {
+			for j in 0 ..< node.triCount {
+				// log.info("ray: %v", ray)
+				intersectShape(tri[shapeIdx[node.leftFirst + j]]^, ray, &logs)
+				// log.info(fmt.aprintf("check:%v/%v", j, node.triCount), logs)
+				clear_dynamic_array(&logs)
+			}
+			triIterations += node.triCount
+			// log.infof("leaf: %v, %v", node.triCount, ray.t)
+			if len(idStack) == 0 do break
+			node = bvhNode[pop(&idStack)]
+		}
+		child1 := node.leftFirst
+		child2 := node.leftFirst + 1
+		dist1 := _intersectAABBFloat(ray^, bvhNode[child1].aabb)
+		dist2 := _intersectAABBFloat(ray^, bvhNode[child2].aabb)
+		bvhIterations += 2
+		if dist1 > dist2 {
+			swap(&dist1, &dist2)
+			swap(&child1, &child2)
+		}
+		// log.infof("dc1: %v, %v | dc2: %v, %v", dist1, child1, dist2, child2)
+		if dist1 == MAX_F32 {
+			if len(idStack) == 0 do break
+			node = bvhNode[pop(&idStack)]
+		} else {
+			node = bvhNode[child1]
+			if dist2 != MAX_F32 do append(&idStack, child2)
+		}
+		i += 1
+	}
+	// log.infof("b: %v, t: %v | end", bvhIterations, triIterations)
+	return bvhIterations, triIterations
+}
+
+intersectShape :: proc(shape: Shape, ray: ^Ray, logs: ^[dynamic]string) {
 	switch type in shape.type {
 	case Tri:
-		_intersectTri(type, ray)
+		append(logs, "stype: Tri")
+		_intersectTri(type, ray, logs)
+	case:
+		append(logs, fmt.aprintf("stype: %v", type))
 	}
 }
 
@@ -333,7 +424,7 @@ BuildBVH :: proc(inputTri: []^Shape) {
 
 UpdateNodeBounds :: proc(nodeIdx: uint) {
 	bvhNode[nodeIdx].aabb = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
-	fmt.println(bvhNode[nodeIdx].triCount)
+	log.infof("count: %v",bvhNode[nodeIdx].triCount)
 	for i in 0 ..< bvhNode[nodeIdx].triCount {
 		s := tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]
 		GrowAABB(&bvhNode[nodeIdx], s.aabb)
@@ -355,7 +446,7 @@ _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
 }
 
 Subdivide :: proc(nodeIdx: uint) {
-	fmt.printfln("Division: %v, Count: %v", nodeIdx, bvhNode[nodeIdx].triCount)
+	log.infof("Division: %v, Count: %v", nodeIdx, bvhNode[nodeIdx].triCount)
 	if bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
 	extent := bvhNode[nodeIdx].aabb.upper - bvhNode[nodeIdx].aabb.lower
@@ -506,19 +597,24 @@ _getTriangleAABB :: proc(leaf: Tri) -> AABB {
 	return bounds
 }
 
-_intersectTri :: proc(triangle: Tri, ray: ^Ray) {
+_intersectTri :: proc(triangle: Tri, ray: ^Ray, logs: ^[dynamic]string) {
 	edge1 := triangle.vertex1 - triangle.vertex0
 	edge2 := triangle.vertex2 - triangle.vertex0
 	h := la.cross(ray.D, edge2)
 	a := la.dot(edge1, h)
+	defer append(logs, "complete")
+	append(logs, fmt.aprintf("a:%v", a))
 	if a > -0.0001 && a < 0.0001 do return
 	f := 1 / a
 	s := ray.O - triangle.vertex0
 	u := f * la.dot(s, h)
+	append(logs, fmt.aprintf(", u:%v", u))
 	if u < 0 || u > 1 do return
 	q := la.cross(s, edge1)
 	v := f * la.dot(ray.D, q)
+	append(logs, fmt.aprintf(", v:%v", v))
 	if v < 0 || u + v > 1 do return
 	t := f * la.dot(edge2, q)
 	if t > 0.0001 do ray.t = min(ray.t, t)
+	append(logs, fmt.aprintf(", t:%v", t))
 }

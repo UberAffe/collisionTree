@@ -1,5 +1,6 @@
 package collisiontree
 
+import "core:log"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
@@ -12,6 +13,7 @@ import "core:strings"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
+import tl "../ThreadLogger"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
@@ -72,9 +74,16 @@ pool_allocator: mem.Allocator
 pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
+g_logger: log.Logger
 
 
 main :: proc() {
+	file, _:= os.open("logs/latest.log",{.Read,.Write,.Append,.Create})
+	defer os.close(file)
+	l:= log.create_file_logger(file)
+	defer log.destroy_file_logger(l)
+	// g_logger=tl.CreateThreadedLogger(l)
+	// context.logger=g_logger
 	fmt.println("Collision Test Started")
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
@@ -184,6 +193,7 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 }
 
 threadScan :: proc(task: thread.Task) {
+	context.logger=g_logger
 	// defer mem.free_all(task.allocator)
 	tc := cast(^ThreadContext)task.data
 	tc.searchTime = 0
@@ -197,7 +207,7 @@ threadScan :: proc(task: thread.Task) {
 		tt += t
 		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
 	}
-	fmt.printfln("thread %v searched %v b and %v s", task.user_index, tb, tt)
+	log.infof("thread %v searched %v b and %v s", task.user_index, tb, tt)
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
 }

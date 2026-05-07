@@ -1,8 +1,9 @@
 package collisiontree
 
-import "core:log"
+import tl "../ThreadLogger"
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
@@ -13,7 +14,6 @@ import "core:strings"
 import "core:thread"
 import time "core:time"
 import rl "vendor:raylib"
-import tl "../ThreadLogger"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
 N :: 64
@@ -52,10 +52,10 @@ BVHNode :: struct #align (4) {
 }
 
 ThreadContext :: struct {
-	xStart, yStart, xLen, yLen: uint,
-	searchTime:                 time.Duration,
-	rays:                       []Ray,
-	Pixels:                     map[ui2]f32,
+	offset:     uint,
+	searchTime: time.Duration,
+	rays:       []Ray,
+	Pixels:     map[uint]f32,
 }
 
 TaskRunner :: struct {
@@ -78,27 +78,16 @@ g_logger: log.Logger
 
 
 main :: proc() {
-	file, _:= os.open("logs/latest.log",{.Read,.Write,.Append,.Create})
+	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
 	defer os.close(file)
-	l:= log.create_file_logger(file)
+	l := log.create_file_logger(file)
 	defer log.destroy_file_logger(l)
 	// g_logger=tl.CreateThreadedLogger(l)
 	// context.logger=g_logger
 	fmt.println("Collision Test Started")
-	mem.dynamic_pool_init(&dyn_pool)
-	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
 	//defer mem.dynamic_pool_destroy(&dyn_pool)
-	num_CPU = os.get_processor_core_count()
-	remaining = 640
-	scanSize = remaining / uint(num_CPU)
-	runners = make([dynamic]TaskRunner, num_CPU, num_CPU)
-	contexts = make([dynamic]ThreadContext, num_CPU, num_CPU)
-	for &r in runners {
-		a:= new(mem.Dynamic_Arena)
-		mem.dynamic_arena_init(a)
-		r.task = threadScan
-		r.allocator = mem.dynamic_arena_allocator(a)
-	}
+	collisionTreeInit(os.get_processor_core_count())
+
 	fmt.println("Bulding Test Triangles")
 	inputTri := buildTestTriangles2()
 	fmt.println("triangles built")
@@ -116,43 +105,26 @@ main :: proc() {
 	p0 := fl3{-2.5, .8, -.5}
 	p1 := fl3{-.5, .8, -.5}
 	p2 := fl3{-2.5, -1.2, -.5}
-	thread.pool_init(&pool, pool_allocator, num_CPU)
-	defer thread.pool_destroy(&pool)
-	thread.pool_start(&pool)
+
+	rays := make([dynamic]Ray,640 * 640,640 * 640)
+	for &ray,i in rays {
+		y := uint(i) / 640
+		x := uint(i) % 640
+		ray.O = camPos
+		ray.D = la.normalize(
+			(p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
+		)
+		ray.t = MAX_F32
+	}
+
 	for !rl.WindowShouldClose() {
 		// defer mem.dynamic_pool_free_all(&dyn_pool)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
-		yStart: uint = 0
-		xStart: uint = 0
-		searchTime = 0
-		remaining = 640
-		for runner, i in runners {
-			free_all(runner.allocator)
-			contexts[i].xStart = xStart
-			contexts[i].yStart = yStart
-			contexts[i].yLen = 640
-			contexts[i].xLen = math.min(scanSize, remaining)
-			delete(contexts[i].rays)
-			contexts[i].rays = make([]Ray, contexts[i].xLen * contexts[i].yLen)
-			for &ray, j in contexts[i].rays {
-				y := uint(j) / contexts[i].xLen
-				x := uint(j) % contexts[i].xLen
-				ray.O = camPos
-				ray.D = la.normalize(
-					(p0 +
-						(p1 - p0) * (f32(x + xStart) / 640) +
-						(p2 - p0) * (f32(y + yStart) / 640)) -
-					ray.O,
-				)
-				ray.t = MAX_F32
-			}
-			remaining -= contexts[i].xLen
-			xStart += contexts[i].xLen
-			delete(contexts[i].Pixels)
-			contexts[i].Pixels = make(map[ui2]f32)
-			thread.pool_add_task(&pool, runner.allocator, runner.task, rawptr(&contexts[i]), i)
+		for &ray in rays{
+			ray.t=MAX_F32
 		}
+		collisionTreeBatchedRayScan(rays[:])
 		for thread.pool_num_outstanding(&pool) > 0 {
 			searchTime += processThreadOutput(&pool)
 		}
@@ -175,7 +147,46 @@ main :: proc() {
 		)
 		rl.EndDrawing()
 	}
+	collistionTreeCleanup()
+}
+
+collisionTreeInit :: proc(threadCount: int) {
+	runners = make([dynamic]TaskRunner, threadCount, threadCount)
+	contexts = make([dynamic]ThreadContext, threadCount, threadCount)
+	for &r in runners {
+		a := new(mem.Dynamic_Arena)
+		mem.dynamic_arena_init(a)
+		r.task = threadScan
+		r.allocator = mem.dynamic_arena_allocator(a)
+	}
+	num_CPU = threadCount
+	mem.dynamic_pool_init(&dyn_pool)
+	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
+	thread.pool_init(&pool, pool_allocator, num_CPU)
+	thread.pool_start(&pool)
+}
+
+collisionTreeBatchedRayScan :: proc(rays: []Ray) {
+	offset: uint = 0
+	maxEnd:= uint(len(rays))
+	scanSize= maxEnd/uint(num_CPU)
+	// fmt.printfln("max: %v, scanSize: %v",maxEnd,scanSize)
+	for run, i in runners {
+		free_all(run.allocator)
+		contexts[i].offset = 0
+		end:= math.min(offset+scanSize,maxEnd)
+		contexts[i].rays = rays[offset:end]
+		// fmt.printfln("context %v rays length: %v",i,len(contexts[i].rays))
+		contexts[i].offset = offset
+		offset += scanSize
+		contexts[i].Pixels = make(map[uint]f32,run.allocator)
+		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
+	}
+}
+
+collistionTreeCleanup :: proc() {
 	thread.pool_shutdown(&pool)
+	thread.pool_destroy(&pool)
 }
 
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
@@ -185,15 +196,19 @@ processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 		tc := cast(^ThreadContext)task.data
 		for key, value in tc.Pixels {
 			v := u8(500 - value * 55)
-			rl.DrawPixelV({f32(tc.xStart + key.x), f32(tc.yStart + key.y)}, {v, v, v, 255})
+			x := key % 640
+			y := key / 640
+			rl.DrawPixelV({f32(x), f32(y)}, {v, v, v, 255})
 		}
+		free_all(task.allocator)
 		return tc.searchTime
 	}
 	return 0
 }
 
 threadScan :: proc(task: thread.Task) {
-	context.logger=g_logger
+	// context.logger = g_logger
+	context.allocator=task.allocator
 	// defer mem.free_all(task.allocator)
 	tc := cast(^ThreadContext)task.data
 	tc.searchTime = 0
@@ -202,14 +217,15 @@ threadScan :: proc(task: thread.Task) {
 	tb: uint = 0
 	tt: uint = 0
 	for &ray, i in tc.rays {
-		b, t:= intersectBVH(&ray)
+		// fmt.println(ray)
+		b, t := intersectBVH(&ray)
 		tb += b
 		tt += t
-		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t
+		if ray.t < MAX_F32 do tc.Pixels[uint(i) + tc.offset] = ray.t
 	}
-	log.infof("thread %v searched %v b and %v s", task.user_index, tb, tt)
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
+	fmt.printfln("thread %v searched %v b and %v s in %v", task.user_index, tb, tt, tc.searchTime)
 }
 
 intersectBVH :: proc {

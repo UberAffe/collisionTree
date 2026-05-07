@@ -85,10 +85,10 @@ main :: proc() {
 	runners = make([dynamic]TaskRunner, num_CPU, num_CPU)
 	contexts = make([dynamic]ThreadContext, num_CPU, num_CPU)
 	for &r in runners {
-		a: mem.Arena
-		mem.arena_init(&a, new([128]byte)[:])
+		a:= new(mem.Dynamic_Arena)
+		mem.dynamic_arena_init(a)
 		r.task = threadScan
-		r.allocator = mem.arena_allocator(&a)
+		r.allocator = mem.dynamic_arena_allocator(a)
 	}
 	fmt.println("Bulding Test Triangles")
 	inputTri := buildTestTriangles2()
@@ -119,6 +119,7 @@ main :: proc() {
 		searchTime = 0
 		remaining = 640
 		for runner, i in runners {
+			free_all(runner.allocator)
 			contexts[i].xStart = xStart
 			contexts[i].yStart = yStart
 			contexts[i].yLen = 640
@@ -168,17 +169,6 @@ main :: proc() {
 	thread.pool_shutdown(&pool)
 }
 
-beginRayIntersections :: proc(rays: ..Ray) {
-	//build tasks
-	//start tasks
-}
-
-beginShapeIntersections :: proc(shapes: ..Shape) {
-	//build tasks
-}
-
-allIntersectionsComplete :: proc() -> bool {return thread.pool_num_outstanding(&pool) == 0}
-
 processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
 	task, ok := thread.pool_pop_done(pool)
 	if ok {
@@ -202,12 +192,7 @@ threadScan :: proc(task: thread.Task) {
 	tb: uint = 0
 	tt: uint = 0
 	for &ray, i in tc.rays {
-		b, t: uint
-		if task.user_index>=8 {
-			b, t = intersectBVH(&ray, rootNodeIdx)
-		} else {
-			b, t = intersectBVH(&ray)
-		}
+		b, t:= intersectBVH(&ray)
 		tb += b
 		tt += t
 		if ray.t < MAX_F32 do tc.Pixels[{uint(i) % tc.xLen, uint(i) / tc.xLen}] = ray.t

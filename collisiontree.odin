@@ -9,7 +9,7 @@ import la "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:sync"
-import ch "core:sync/chan"
+import "core:sync/chan"
 import "core:thread"
 import time "core:time"
 
@@ -43,6 +43,12 @@ Ray :: struct {
 	t:    f32,
 }
 
+Hit :: struct{
+	rayID:uint,
+	shapeID: int,
+	dist: f32
+}
+
 BVHNode :: struct #align (4) {
 	aabb:      AABB `json:"aabb"`, //3d bounds
 	leftFirst: uint `json:"leftFirst"`,
@@ -55,7 +61,7 @@ ThreadContext :: struct {
 	searchTime: time.Duration,
 	colTree:    ^CollisionTree,
 	rays:       []Ray,
-	Hit:        map[uint]uint,
+	hit:        [dynamic]Hit,
 }
 
 TaskRunner :: struct {
@@ -78,9 +84,12 @@ pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
 commsAllocator: mem.Allocator
-comms: ch.Chan(^ThreadContext)
+comms: chan.Chan(ThreadContext)
 g_logger: log.Logger
 freeAllocators: [dynamic]mem.Allocator
+runChanAlloc: mem.Allocator
+runChan: chan.Chan(mem.Allocator)
+freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
 // jsMarshalOptions := js.Marshal_Options {
 // 	.JSON5,
@@ -101,6 +110,8 @@ completeGroup: ^sync.Wait_Group
 collisionTreeInit :: proc(threadCount: int = 1) {
 	commsAllocator = _newArenaAllocator()
 	completeGroup = new(sync.Wait_Group)
+	freeMutex = new(sync.Mutex)
+	runChanAlloc = _newArenaAllocator()
 	freeAllocators = make([dynamic]mem.Allocator)
 	num_CPU = threadCount
 	mem.dynamic_pool_init(&dyn_pool)
@@ -125,7 +136,7 @@ collistionTreeCleanup :: proc() {
 	thread.pool_destroy(&pool)
 	free_all(pool_allocator)
 	mem.dynamic_pool_destroy(cast(^mem.Dynamic_Pool)pool_allocator.data)
-	ch.destroy(comms)
+	chan.destroy(comms)
 	free_all(commsAllocator)
 	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
 }
@@ -145,20 +156,31 @@ collisionTreeBatchedRayScan :: proc(
 	rays: []Ray,
 	maxBatchSize := 640,
 ) -> (
-	ch.Chan(^ThreadContext, .Recv),
+	chan.Chan(ThreadContext, .Recv),
 	int,
 ) {
 	free_all(commsAllocator)
-	ch.destroy(comms)
+	chan.close(comms)
+	chan.destroy(comms)
 	delete(runners)
+	for c in contexts{
+		delete(c.hit)
+	}
 	delete(contexts)
 	offset: uint = 0
 	maxEnd := uint(len(rays))
 	scanSize = math.min(maxEnd / uint(num_CPU), uint(maxBatchSize))
 	tCount := maxEnd / scanSize
-	c, err := ch.create_buffered(ch.Chan(^ThreadContext), tCount, commsAllocator)
+	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
 	comms = c
+	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), num_CPU, runChanAlloc)
+	assert(err == .None)
+	defer chan.close(runChan)
+	defer chan.destroy(runChan)
+	for i in 0 ..< num_CPU {
+		chan.send(runChan, _newArenaAllocator())
+	}
 	runners = make([dynamic]TaskRunner, tCount, tCount)
 	contexts = make([dynamic]ThreadContext, tCount, tCount)
 	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
@@ -166,19 +188,20 @@ collisionTreeBatchedRayScan :: proc(
 	sync.wait_group_add(completeGroup, int(tCount))
 	fmt.printfln("added %v to wait group", tCount)
 	for &run, i in runners {
+		ok: bool
 		run.task = _threadScan
-		run.allocator = len(freeAllocators) > 0 ? pop(&freeAllocators) : _newArenaAllocator()
+		run.allocator, ok = chan.recv(runChan)
+		assert(ok)
 		contexts[i].offset = 0
 		end := math.min(offset + scanSize, maxEnd)
 		contexts[i].colTree = colTree
 		contexts[i].rays = rays[offset:end]
 		contexts[i].offset = offset
 		offset += scanSize
-		contexts[i].Hit = make(map[uint]uint, run.allocator)
-		fmt.printfln("creating %v", i)
+		contexts[i].hit = make([dynamic]Hit)
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
 	}
-	return ch.as_recv(comms), int(tCount)
+	return chan.as_recv(comms), int(tCount)
 }
 
 _newArenaAllocator :: proc() -> mem.Allocator {
@@ -188,35 +211,42 @@ _newArenaAllocator :: proc() -> mem.Allocator {
 }
 
 _threadScan :: proc(task: thread.Task) {
+	context.allocator = task.allocator
+	tc := (cast(^ThreadContext)task.data)^
 	// context.logger = g_logger
 	fmt.printfln("started %v", task.user_index)
 	// if true do return
-	context.allocator = task.allocator
-	tc := cast(^ThreadContext)task.data
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	tb: uint = 0
 	tt: uint = 0
 	for &ray, i in tc.rays {
-		b, t, sID := _intersectBVH(tc.colTree, &ray)
+		b, t, sID := _intersectBVH(tc.colTree, &ray) //, tc.colTree.rootNodeIdx)
 		tb += b
 		tt += t
-		if ray.t < MAX_F32 do tc.Hit[uint(i) + tc.offset] = sID
+		if ray.t < MAX_F32 && sID >= 0 {
+			key:= uint(i)+tc.offset
+			if key<tc.offset || key>tc.offset+len(tc.rays){
+				fmt.printfln("task %v is attempting to write key %v outside of its range[%v,%v)",task.user_index,key,tc.offset,tc.offset+len(tc.rays))
+			} 
+			append(&tc.hit,Hit{key,sID, ray.t})
+		}
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
 	fmt.printfln(
-		"thread %v searched %v rays among %v b and %v s in %v",
+		"thread %v hit %v/%v rays among %v b and %v s in %v",
 		task.user_index,
+		len(tc.hit),
 		len(tc.rays),
 		tb,
 		tt,
 		tc.searchTime,
 	)
-	ch.send(comms, tc)
+	chan.send(comms, tc)
 	free_all(runners[task.user_index].allocator)
-	append(&freeAllocators, runners[task.user_index].allocator)
+	chan.send(runChan, runners[task.user_index].allocator)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
 	fmt.printfln("task %v is fully complete", task.user_index)
 }
@@ -260,42 +290,59 @@ _intersectBVH :: proc {
 }
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
-_intersectBVHRecursive :: proc(colTree: ^CollisionTree, ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
+_intersectBVHRecursive :: proc(
+	colTree: ^CollisionTree,
+	ray: ^Ray,
+	nodeIdx: uint,
+) -> (
+	uint,
+	uint,
+	int,
+) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
-	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
+	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations, 0
+	sID := -1
 	if colTree.bvhNode[nodeIdx].triCount > 0 {
+		prevT := ray.t
 		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
-			_intersectShape(
-				colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]^,
-				ray,
-			)
+			testSID := int(colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i])
+			assert(testSID >= 0)
+			_intersectShape(colTree.tri[testSID]^, ray)
+			if ray.t < prevT {
+				prevT = ray.t
+				sID = testSID
+			}
 			triIterations += 1
 		}
 	} else {
 		b, t: uint
-		b, t = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst)
+		b, t, sID = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst)
+		prevT := ray.t
+		testSID: int
 		bvhIterations += b
 		triIterations += t
-		b, t = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst + 1)
+		b, t, testSID = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst + 1)
+		if ray.t < prevT do sID = testSID
 		bvhIterations += b
 		triIterations += t
 	}
-	return bvhIterations, triIterations
+	return bvhIterations, triIterations, sID
 }
-_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (uint, uint, uint) {
+_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (uint, uint, int) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
 	node := &colTree.bvhNode[colTree.rootNodeIdx]
 	idStack := make([dynamic]^BVHNode, 0, 64)
-	sID: uint
+	sID := -1
 	for {
 		if (_isLeaf(node^)) {
 			prevT: f32
 			for i in 0 ..< node.triCount {
 				prevT = ray.t
-				curID := colTree.shapeIdx[node.leftFirst + i]
-				_intersectShape(colTree.tri[sID]^, ray)
+				curID := int(colTree.shapeIdx[node.leftFirst + i])
+				assert(curID >= 0)
+				_intersectShape(colTree.tri[curID]^, ray)
 				if ray.t < prevT do sID = curID
 			}
 			triIterations += node.triCount

@@ -19,7 +19,7 @@ TEST:: 64
 pixelMutex: ^sync.Mutex
 pixels: [N * N]rl.Color
 searchTime: time.Duration
-recvComms: chan.Chan(^ThreadContext, .Recv)
+recvComms: chan.Chan(ThreadContext, .Recv)
 
 
 main :: proc() {
@@ -69,15 +69,19 @@ main :: proc() {
 			ray.t = MAX_F32
 		}
 		count: int
-		recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], 1280)
+		recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], N)
 		for i in 0 ..< count {
             //this call blocks until a message is recieved.
 			data, ok := chan.recv(recvComms)
 			assert(ok)
-            fmt.printfln("ray hits: %v",len(data.Hit))
-			for rayID, shapeID in data.Hit {
-				v := u8(500 - data.rays[rayID-data.offset].t * 55)
-				rl.DrawPixel(i32(rayID)%N,i32(rayID)/N, {v, v, v, 255})
+			for len(data.hit)>0 {
+                hit:=pop(&data.hit)
+                if hit.rayID<data.offset || hit.rayID-data.offset>=len(data.rays){
+                     fmt.printfln("ray %v with offset %v from task %v",hit.rayID,data.offset,data.offset/len(data.rays))
+                }
+				v :u8= u8(500 - data.rays[hit.rayID-data.offset].t * 55)
+				rl.DrawPixel(i32(hit.rayID)%N,i32(hit.rayID)/N, {v, v, v, 255})
+                free(&hit)
 			}
 			searchTime += data.searchTime
 		}

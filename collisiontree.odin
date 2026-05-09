@@ -1,29 +1,27 @@
 package collisiontree
 
-import tl "../ThreadLogger"
 import "base:runtime"
+import enc "core:encoding/json"
 import "core:fmt"
 import "core:log"
 import "core:math"
 import la "core:math/linalg"
-import "core:math/rand"
 import "core:mem"
-import os "core:os"
-import "core:strconv"
-import "core:strings"
+import "core:os"
+import "core:sync"
+import ch "core:sync/chan"
 import "core:thread"
 import time "core:time"
-import rl "vendor:raylib"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
-N :: 64
 scanSize: uint
 
 fl3 :: [3]f32
 ui2 :: [2]uint
 
 AABB :: struct #align (4) {
-	upper, lower: fl3,
+	upper: fl3 `json:"upper"`,
+	lower: fl3 `json:"lower"`,
 }
 
 Shape :: struct {
@@ -46,16 +44,18 @@ Ray :: struct {
 }
 
 BVHNode :: struct #align (4) {
-	aabb:                AABB, //3d bounds
-	leftFirst, triCount: uint,
+	aabb:      AABB `json:"aabb"`, //3d bounds
+	leftFirst: uint `json:"leftFirst"`,
+	triCount:  uint `json:"triCount"`,
 	//total size 32 bytes
 }
 
 ThreadContext :: struct {
 	offset:     uint,
 	searchTime: time.Duration,
+	colTree:    ^CollisionTree,
 	rays:       []Ray,
-	Pixels:     map[uint]f32,
+	Hit:        map[uint]uint,
 }
 
 TaskRunner :: struct {
@@ -63,102 +63,45 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-tri: []^Shape
-shapeIdx: []uint
-bvhNode: []BVHNode //N 64 byte pages for optimal loading
-rootNodeIdx, nodesUsed: uint = 0, 2
+CollisionTree :: struct {
+	tri:         []^Shape `json:"-"`,
+	shapeIdx:    []uint `json:"shapeIdx"`,
+	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
+	rootNodeIdx: uint `json:"rootNodeIdx"`,
+	nodesUsed:   uint `json:"nodesUsed"`,
+}
+
 num_CPU: int
-remaining: uint
 dyn_pool: mem.Dynamic_Pool
 pool_allocator: mem.Allocator
 pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
+commsAllocator: mem.Allocator
+comms: ch.Chan(^ThreadContext)
 g_logger: log.Logger
+freeAllocators: [dynamic]mem.Allocator
+completeGroup: ^sync.Wait_Group
+// jsMarshalOptions := js.Marshal_Options {
+// 	.JSON5,
+// 	false,
+// 	false,
+// 	0,
+// 	false,
+// 	true,
+// 	false,
+// 	false,
+// 	true,
+// 	0,
+// 	false,
+// 	false,
+// }
 
 
-main :: proc() {
-	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
-	defer os.close(file)
-	l := log.create_file_logger(file)
-	defer log.destroy_file_logger(l)
-	// g_logger=tl.CreateThreadedLogger(l)
-	// context.logger=g_logger
-	fmt.println("Collision Test Started")
-	//defer mem.dynamic_pool_destroy(&dyn_pool)
-	collisionTreeInit(os.get_processor_core_count())
-
-	fmt.println("Bulding Test Triangles")
-	inputTri := buildTestTriangles2()
-	fmt.println("triangles built")
-	bWatch := time.Stopwatch{}
-	fmt.println("Building BVH")
-	time.stopwatch_start(&bWatch)
-	BuildBVH(inputTri)
-	time.stopwatch_stop(&bWatch)
-	fmt.println("BVH built")
-
-	rl.InitWindow(640, 640, "test")
-	defer rl.CloseWindow()
-	searchTime: time.Duration
-	camPos := fl3{-1.5, -.2, -2.5}
-	p0 := fl3{-2.5, .8, -.5}
-	p1 := fl3{-.5, .8, -.5}
-	p2 := fl3{-2.5, -1.2, -.5}
-
-	rays := make([dynamic]Ray,640 * 640,640 * 640)
-	for &ray,i in rays {
-		y := uint(i) / 640
-		x := uint(i) % 640
-		ray.O = camPos
-		ray.D = la.normalize(
-			(p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
-		)
-		ray.t = MAX_F32
-	}
-
-	for !rl.WindowShouldClose() {
-		// defer mem.dynamic_pool_free_all(&dyn_pool)
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.WHITE)
-		for &ray in rays{
-			ray.t=MAX_F32
-		}
-		collisionTreeBatchedRayScan(rays[:])
-		for thread.pool_num_outstanding(&pool) > 0 {
-			searchTime += processThreadOutput(&pool)
-		}
-		searchTime += processThreadOutput(&pool)
-		rl.DrawFPS(10, 10)
-		rl.DrawText(
-			fmt.ctprintf(
-				"build time: %v\ncumulative search time: %v\naverage search time: %v\n409,600 rays across %v threads\ntriangles: %v\nTPR: %v",
-				time.stopwatch_duration(bWatch),
-				searchTime,
-				searchTime / time.Duration(num_CPU),
-				num_CPU,
-				len(tri),
-				searchTime / (640 * 640),
-			),
-			10,
-			40,
-			16,
-			{0, 0, 0, 255},
-		)
-		rl.EndDrawing()
-	}
-	collistionTreeCleanup()
-}
-
-collisionTreeInit :: proc(threadCount: int) {
-	runners = make([dynamic]TaskRunner, threadCount, threadCount)
-	contexts = make([dynamic]ThreadContext, threadCount, threadCount)
-	for &r in runners {
-		a := new(mem.Dynamic_Arena)
-		mem.dynamic_arena_init(a)
-		r.task = threadScan
-		r.allocator = mem.dynamic_arena_allocator(a)
-	}
+collisionTreeInit :: proc(threadCount: int = 1) {
+	commsAllocator = _newArenaAllocator()
+	completeGroup = new(sync.Wait_Group)
+	freeAllocators = make([dynamic]mem.Allocator)
 	num_CPU = threadCount
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
@@ -166,50 +109,89 @@ collisionTreeInit :: proc(threadCount: int) {
 	thread.pool_start(&pool)
 }
 
-collisionTreeBatchedRayScan :: proc(rays: []Ray) {
-	offset: uint = 0
-	maxEnd:= uint(len(rays))
-	scanSize= maxEnd/uint(num_CPU)
-	// fmt.printfln("max: %v, scanSize: %v",maxEnd,scanSize)
-	for run, i in runners {
-		free_all(run.allocator)
-		contexts[i].offset = 0
-		end:= math.min(offset+scanSize,maxEnd)
-		contexts[i].rays = rays[offset:end]
-		// fmt.printfln("context %v rays length: %v",i,len(contexts[i].rays))
-		contexts[i].offset = offset
-		offset += scanSize
-		contexts[i].Pixels = make(map[uint]f32,run.allocator)
-		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
-	}
-}
-
 collistionTreeCleanup :: proc() {
+	delete(runners)
+	delete(contexts)
+	for run in runners {
+		free_all(run.allocator)
+		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)run.allocator.data)
+	}
+	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
+	for al in freeAllocators {
+		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)al.data)
+	}
+	delete(freeAllocators)
 	thread.pool_shutdown(&pool)
 	thread.pool_destroy(&pool)
+	free_all(pool_allocator)
+	mem.dynamic_pool_destroy(cast(^mem.Dynamic_Pool)pool_allocator.data)
+	ch.destroy(comms)
+	free_all(commsAllocator)
+	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
 }
 
-processThreadOutput :: proc(pool: ^thread.Pool) -> time.Duration {
-	task, ok := thread.pool_pop_done(pool)
-	if ok {
-		// fmt.printfln("drawing thread %v results", task.user_index)
-		tc := cast(^ThreadContext)task.data
-		for key, value in tc.Pixels {
-			v := u8(500 - value * 55)
-			x := key % 640
-			y := key / 640
-			rl.DrawPixelV({f32(x), f32(y)}, {v, v, v, 255})
-		}
-		free_all(task.allocator)
-		return tc.searchTime
+waitForBatch :: proc() {
+	sync.wait(completeGroup)
+	fmt.println("complete")
+}
+
+//default wait is 1 ms
+isBatchComplete :: proc(timeOut: time.Duration = 1_000_000) -> bool {
+	return sync.wait_group_wait_with_timeout(completeGroup, timeOut)
+}
+
+collisionTreeBatchedRayScan :: proc(
+	colTree: ^CollisionTree,
+	rays: []Ray,
+	maxBatchSize := 640,
+) -> (
+	ch.Chan(^ThreadContext, .Recv),
+	int,
+) {
+	free_all(commsAllocator)
+	ch.destroy(comms)
+	delete(runners)
+	delete(contexts)
+	offset: uint = 0
+	maxEnd := uint(len(rays))
+	scanSize = math.min(maxEnd / uint(num_CPU), uint(maxBatchSize))
+	tCount := maxEnd / scanSize
+	c, err := ch.create_buffered(ch.Chan(^ThreadContext), tCount, commsAllocator)
+	assert(err == .None)
+	comms = c
+	runners = make([dynamic]TaskRunner, tCount, tCount)
+	contexts = make([dynamic]ThreadContext, tCount, tCount)
+	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
+	fmt.println("adding to waitgroup")
+	sync.wait_group_add(completeGroup, int(tCount))
+	fmt.printfln("added %v to wait group", tCount)
+	for &run, i in runners {
+		run.task = _threadScan
+		run.allocator = len(freeAllocators) > 0 ? pop(&freeAllocators) : _newArenaAllocator()
+		contexts[i].offset = 0
+		end := math.min(offset + scanSize, maxEnd)
+		contexts[i].colTree = colTree
+		contexts[i].rays = rays[offset:end]
+		contexts[i].offset = offset
+		offset += scanSize
+		contexts[i].Hit = make(map[uint]uint, run.allocator)
+		fmt.printfln("creating %v", i)
+		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
 	}
-	return 0
+	return ch.as_recv(comms), int(tCount)
 }
 
-threadScan :: proc(task: thread.Task) {
+_newArenaAllocator :: proc() -> mem.Allocator {
+	a := new(mem.Dynamic_Arena)
+	mem.dynamic_arena_init(a, alignment = 64)
+	return mem.dynamic_arena_allocator(a)
+}
+
+_threadScan :: proc(task: thread.Task) {
 	// context.logger = g_logger
-	context.allocator=task.allocator
-	// defer mem.free_all(task.allocator)
+	fmt.printfln("started %v", task.user_index)
+	// if true do return
+	context.allocator = task.allocator
 	tc := cast(^ThreadContext)task.data
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
@@ -217,64 +199,118 @@ threadScan :: proc(task: thread.Task) {
 	tb: uint = 0
 	tt: uint = 0
 	for &ray, i in tc.rays {
-		// fmt.println(ray)
-		b, t := intersectBVH(&ray)
+		b, t, sID := _intersectBVH(tc.colTree, &ray)
 		tb += b
 		tt += t
-		if ray.t < MAX_F32 do tc.Pixels[uint(i) + tc.offset] = ray.t
+		if ray.t < MAX_F32 do tc.Hit[uint(i) + tc.offset] = sID
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
-	fmt.printfln("thread %v searched %v b and %v s in %v", task.user_index, tb, tt, tc.searchTime)
+	fmt.printfln(
+		"thread %v searched %v rays among %v b and %v s in %v",
+		task.user_index,
+		len(tc.rays),
+		tb,
+		tt,
+		tc.searchTime,
+	)
+	ch.send(comms, tc)
+	free_all(runners[task.user_index].allocator)
+	append(&freeAllocators, runners[task.user_index].allocator)
+	sync.wait_group_done(completeGroup) //signal that this task is complete
+	fmt.printfln("task %v is fully complete", task.user_index)
 }
 
-intersectBVH :: proc {
-	intersectBVHRecursive,
-	intersectBVHLoop,
+saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
+	file, err := os.open(path, {.Create, .Write, .Read})
+	defer os.close(file)
+	if err != nil {
+		fmt.printfln("file error: %v", err)
+		return 0
+	}
+	binary, encError := enc.marshal(colTree^, {})
+	if encError != nil {
+		fmt.printfln("encoding error:%v", encError)
+		return 0
+	}
+	defer delete(binary)
+	written, writeEr := os.write(file, binary)
+	if writeEr != nil {
+		fmt.printfln("write error: %v", writeEr)
+		return 0
+	}
+	return written
+}
+
+loadBVH :: proc(path: string, inputTri: []^Shape) -> ^CollisionTree {
+	file, err := os.open(path, {.Create, .Write, .Read})
+	defer os.close(file)
+	if err != nil do return nil
+	binary, _ := os.read_entire_file(file, context.allocator)
+	colTree := new(CollisionTree)
+	unerr := enc.unmarshal(binary, colTree)
+	if unerr != nil do return nil
+	colTree.tri = inputTri
+	return colTree
+}
+
+_intersectBVH :: proc {
+	_intersectBVHRecursive,
+	_intersectBVHLoop,
 }
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the first object
-intersectBVHRecursive :: proc(ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
+_intersectBVHRecursive :: proc(colTree: ^CollisionTree, ray: ^Ray, nodeIdx: uint) -> (uint, uint) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
-	if !_intersectAABBBool(ray^, bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
-	if bvhNode[nodeIdx].triCount > 0 {
-		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			intersectShape(tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]^, ray)
+	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations
+	if colTree.bvhNode[nodeIdx].triCount > 0 {
+		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
+			_intersectShape(
+				colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]^,
+				ray,
+			)
 			triIterations += 1
 		}
 	} else {
 		b, t: uint
-		b, t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst)
+		b, t = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst)
 		bvhIterations += b
 		triIterations += t
-		b, t = intersectBVH(ray, bvhNode[nodeIdx].leftFirst + 1)
+		b, t = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst + 1)
 		bvhIterations += b
 		triIterations += t
 	}
 	return bvhIterations, triIterations
 }
-intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
+_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (uint, uint, uint) {
 	bvhIterations := uint(1)
 	triIterations := uint(0)
-	node := &bvhNode[rootNodeIdx]
+	node := &colTree.bvhNode[colTree.rootNodeIdx]
 	idStack := make([dynamic]^BVHNode, 0, 64)
-	defer delete_dynamic_array(idStack)
+	sID: uint
 	for {
-		if (isLeaf(node^)) {
-			for i in 0 ..< node.triCount do intersectShape(tri[shapeIdx[node.leftFirst + i]]^, ray)
+		if (_isLeaf(node^)) {
+			prevT: f32
+			for i in 0 ..< node.triCount {
+				prevT = ray.t
+				curID := colTree.shapeIdx[node.leftFirst + i]
+				_intersectShape(colTree.tri[sID]^, ray)
+				if ray.t < prevT do sID = curID
+			}
 			triIterations += node.triCount
 			if len(idStack) == 0 do break
 			node = pop(&idStack)
+			continue
 		}
-		child1 := &bvhNode[node.leftFirst]
-		child2 := &bvhNode[node.leftFirst + 1]
+		child1 := &colTree.bvhNode[node.leftFirst]
+		child2 := &colTree.bvhNode[node.leftFirst + 1]
 		dist1 := _intersectAABBFloat(ray^, child1.aabb)
 		dist2 := _intersectAABBFloat(ray^, child2.aabb)
 		bvhIterations += 2
 		if dist1 > dist2 {
-			swap(&dist1, &dist2)
-			swap(&child1, &child2)
+			_swap(&dist1, &dist2)
+			_swap(&child1, &child2)
 		}
 		if dist1 == MAX_F32 {
 			if len(idStack) == 0 do break
@@ -284,10 +320,10 @@ intersectBVHLoop :: proc(ray: ^Ray) -> (uint, uint) {
 			if dist2 != MAX_F32 do append(&idStack, child2)
 		}
 	}
-	return bvhIterations, triIterations
+	return bvhIterations, triIterations, sID
 }
 
-intersectShape :: proc(shape: Shape, ray: ^Ray) {
+_intersectShape :: proc(shape: Shape, ray: ^Ray) {
 	switch type in shape.type {
 	case Tri:
 		_intersectTri(type, ray)
@@ -329,49 +365,54 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 
-BuildBVH :: proc(inputTri: []^Shape) {
-	tri = inputTri
-	length := len(tri)
-	shapeIdx = make([]uint, length)
-	bvhNode = runtime.make_aligned([]BVHNode, 2 * length, 64)
-	for &t, i in tri {
-		shapeIdx[i] = uint(i)
+BuildBVH :: proc(inputTri: []^Shape) -> ^CollisionTree {
+	colTree := new(CollisionTree)
+	colTree.rootNodeIdx = 0
+	colTree.nodesUsed = 2
+	colTree.tri = inputTri
+	length := len(colTree.tri)
+	colTree.shapeIdx = make([]uint, length)
+	colTree.bvhNode = make([dynamic]BVHNode, 0, 2 * length)
+	for &t, i in colTree.tri {
+		colTree.shapeIdx[i] = uint(i)
 	}
-	bvhNode[rootNodeIdx].triCount = uint(length)
-	UpdateNodeBounds(rootNodeIdx)
-	Subdivide(rootNodeIdx)
+	if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
+	colTree.bvhNode[colTree.rootNodeIdx].triCount = uint(length)
+	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
+	_Subdivide(colTree, colTree.rootNodeIdx)
+	return colTree
 }
 
-UpdateNodeBounds :: proc(nodeIdx: uint) {
-	bvhNode[nodeIdx].aabb = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
-	fmt.println(bvhNode[nodeIdx].triCount)
-	for i in 0 ..< bvhNode[nodeIdx].triCount {
-		s := tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]
-		GrowAABB(&bvhNode[nodeIdx], s.aabb)
+_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
+	colTree.bvhNode[nodeIdx].aabb = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
+	fmt.println(colTree.bvhNode[nodeIdx].triCount)
+	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
+		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
+		_GrowAABB(&colTree.bvhNode[nodeIdx], s.aabb)
 	}
 }
 
-GrowAABB :: proc {
+_GrowAABB :: proc {
 	_growAABBWithBox,
 	_growAABBWithNode,
 }
 
 _growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
-	node.aabb.lower = fminf(node.aabb.lower, leaf.lower)
-	node.aabb.upper = fmaxf(node.aabb.upper, leaf.upper)
+	node.aabb.lower = _fminf(node.aabb.lower, leaf.lower)
+	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
 }
 _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
-	node.lower = fminf(node.lower, leaf.lower)
-	node.upper = fmaxf(node.upper, leaf.upper)
+	node.lower = _fminf(node.lower, leaf.lower)
+	node.upper = _fmaxf(node.upper, leaf.upper)
 }
 
-Subdivide :: proc(nodeIdx: uint) {
-	fmt.printfln("Division: %v, Count: %v", nodeIdx, bvhNode[nodeIdx].triCount)
-	if bvhNode[nodeIdx].triCount <= 2 do return
+_Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
+	fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
+	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
-	extent := bvhNode[nodeIdx].aabb.upper - bvhNode[nodeIdx].aabb.lower
+	extent := colTree.bvhNode[nodeIdx].aabb.upper - colTree.bvhNode[nodeIdx].aabb.lower
 	parentCost :=
-		f32(bvhNode[nodeIdx].triCount) *
+		f32(colTree.bvhNode[nodeIdx].triCount) *
 		(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
 	// axis := 0
 	// if extent.y > extent.x do axis = 1
@@ -380,10 +421,10 @@ Subdivide :: proc(nodeIdx: uint) {
 	bestAxis := -1
 	bestPos, bestCost: f32 = 0, MAX_F32
 	for axis in 0 ..< 3 {
-		for i in 0 ..< bvhNode[nodeIdx].triCount {
-			shape := tri[shapeIdx[bvhNode[nodeIdx].leftFirst + i]]
+		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
+			shape := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
 			candidatePos := shape.centroid[axis]
-			cost := evaluateSAH(&bvhNode[nodeIdx], axis, candidatePos)
+			cost := _evaluateSAH(colTree, &colTree.bvhNode[nodeIdx], axis, candidatePos)
 			if (cost < bestCost) {
 				bestPos = candidatePos
 				bestCost = cost
@@ -393,127 +434,82 @@ Subdivide :: proc(nodeIdx: uint) {
 	}
 	if bestCost >= parentCost do return
 	//in place partition
-	i := int(bvhNode[nodeIdx].leftFirst)
-	j := i + int(bvhNode[nodeIdx].triCount) - 1
+	i := int(colTree.bvhNode[nodeIdx].leftFirst)
+	j := i + int(colTree.bvhNode[nodeIdx].triCount) - 1
 	for i <= j {
-		if tri[shapeIdx[i]].centroid[bestAxis] < bestPos {
+		if colTree.tri[colTree.shapeIdx[i]].centroid[bestAxis] < bestPos {
 			i += 1
 		} else {
-			swap(&shapeIdx[i], &shapeIdx[j])
+			_swap(&colTree.shapeIdx[i], &colTree.shapeIdx[j])
 			j -= 1
 		}
 	}
 	//abort split if one side empty
-	leftCount := uint(i) - bvhNode[nodeIdx].leftFirst
-	if leftCount == 0 || leftCount == bvhNode[nodeIdx].triCount do return
+	leftCount := uint(i) - colTree.bvhNode[nodeIdx].leftFirst
+	if leftCount == 0 || leftCount == colTree.bvhNode[nodeIdx].triCount do return
 	// create child nodes
-	leftChildIdx := nodesUsed
-	nodesUsed += 1
-	rightChildIdx := nodesUsed
-	nodesUsed += 1
-	bvhNode[leftChildIdx].leftFirst = bvhNode[nodeIdx].leftFirst
-	bvhNode[nodeIdx].leftFirst = leftChildIdx
-	bvhNode[leftChildIdx].triCount = leftCount
-	bvhNode[rightChildIdx].leftFirst = uint(i)
-	bvhNode[rightChildIdx].triCount = bvhNode[nodeIdx].triCount - leftCount
-	bvhNode[nodeIdx].triCount = 0
-	UpdateNodeBounds(leftChildIdx)
-	UpdateNodeBounds(rightChildIdx)
-	Subdivide(leftChildIdx)
-	Subdivide(rightChildIdx)
+	leftChildIdx := colTree.nodesUsed
+	colTree.nodesUsed += 1
+	rightChildIdx := colTree.nodesUsed
+	colTree.nodesUsed += 1
+	for len(colTree.bvhNode) <= int(rightChildIdx) do append(&colTree.bvhNode, BVHNode{})
+	colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
+	colTree.bvhNode[nodeIdx].leftFirst = leftChildIdx
+	colTree.bvhNode[leftChildIdx].triCount = leftCount
+	colTree.bvhNode[rightChildIdx].leftFirst = uint(i)
+	colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
+	colTree.bvhNode[nodeIdx].triCount = 0
+	_UpdateNodeBounds(colTree, leftChildIdx)
+	_UpdateNodeBounds(colTree, rightChildIdx)
+	_Subdivide(colTree, leftChildIdx)
+	_Subdivide(colTree, rightChildIdx)
 }
 
-evaluateSAH :: proc(node: ^BVHNode, axis: int, pos: f32) -> f32 {
+_evaluateSAH :: proc(colTree: ^CollisionTree, node: ^BVHNode, axis: int, pos: f32) -> f32 {
 	leftBox, rightBox: AABB
 	leftCount, rightCount: f32 = 0, 0
 	for i in 0 ..< node.triCount {
-		shape := tri[shapeIdx[node.leftFirst + i]]
+		shape := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
 		if shape.centroid[axis] < pos {
 			leftCount += 1
-			GrowAABB(&leftBox, shape.aabb)
+			_GrowAABB(&leftBox, shape.aabb)
 		} else {
 			rightCount += 1
-			GrowAABB(&rightBox, shape.aabb)
+			_GrowAABB(&rightBox, shape.aabb)
 		}
 	}
-	cost := leftCount * areaAABB(leftBox) + rightCount * areaAABB(rightBox)
+	cost := leftCount * _areaAABB(leftBox) + rightCount * _areaAABB(rightBox)
 	return cost > 0 ? cost : MAX_F32
 }
 
-areaAABB :: proc(aabb: AABB) -> f32 {
+_areaAABB :: proc(aabb: AABB) -> f32 {
 	e := aabb.upper - aabb.lower
 	return e.x * e.y + e.y * e.z + e.z * e.x
 }
 
-swap :: proc(first, second: ^$T) {
+_swap :: proc(first, second: ^$T) {
 	t := first^
 	first^ = second^
 	second^ = t
 }
-isLeaf :: proc(node: BVHNode) -> bool {
+_isLeaf :: proc(node: BVHNode) -> bool {
 	return node.triCount > 0
 }
-fminf :: proc(first, second: fl3) -> fl3 {
+_fminf :: proc(first, second: fl3) -> fl3 {
 	return {min(first.x, second.x), min(first.y, second.y), min(first.z, second.z)}
 }
-fmaxf :: proc(first, second: fl3) -> fl3 {
+_fmaxf :: proc(first, second: fl3) -> fl3 {
 	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
-}
-
-buildTestTriangles :: proc() -> []^Shape {
-	input := make([]^Shape, N)
-	rand.reset(12345678910)
-	rf := rand.float32_uniform
-	for &t, i in input {
-		triangle := Tri{}
-		r0 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		r1 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		r2 := fl3{rf(0, 1), rf(0, 1), rf(0, 1)}
-		triangle.vertex0 = r0 * 9 - fl3{5, 5, 5}
-		triangle.vertex1 = triangle.vertex0 + r1 * 2
-		triangle.vertex2 = triangle.vertex0 + r2 * 2
-		input[i] = new(Shape)
-		input[i].aabb = _getTriangleAABB(triangle)
-		input[i].type = triangle
-		input[i].centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
-	}
-	return input
-}
-
-buildTestTriangles2 :: proc() -> []^Shape {
-	data, err := os.read_entire_file("assets/unity.tri", context.allocator)
-	defer delete(data, context.allocator)
-	iterator := string(data)
-	pointList := make([dynamic]f32, 9, 9)
-	input := make([dynamic]^Shape)
-	for line in strings.split_lines_iterator(&iterator) {
-		vals: []string
-		vals, err = strings.split(line, " ")
-		for v, j in vals {
-			pointList[j], _ = strconv.parse_f32(v)
-		}
-		triangle := Tri {
-			{pointList[0], pointList[1], pointList[2]},
-			{pointList[3], pointList[4], pointList[5]},
-			{pointList[6], pointList[7], pointList[8]},
-		}
-		s := new(Shape)
-		s.centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
-		s.aabb = _getTriangleAABB(triangle)
-		s.type = triangle
-		append(&input, s)
-	}
-	return input[:]
 }
 
 _getTriangleAABB :: proc(leaf: Tri) -> AABB {
 	bounds: AABB = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
-	bounds.lower = fminf(bounds.lower, leaf.vertex0)
-	bounds.lower = fminf(bounds.lower, leaf.vertex1)
-	bounds.lower = fminf(bounds.lower, leaf.vertex2)
-	bounds.upper = fmaxf(bounds.upper, leaf.vertex0)
-	bounds.upper = fmaxf(bounds.upper, leaf.vertex1)
-	bounds.upper = fmaxf(bounds.upper, leaf.vertex2)
+	bounds.lower = _fminf(bounds.lower, leaf.vertex0)
+	bounds.lower = _fminf(bounds.lower, leaf.vertex1)
+	bounds.lower = _fminf(bounds.lower, leaf.vertex2)
+	bounds.upper = _fmaxf(bounds.upper, leaf.vertex0)
+	bounds.upper = _fmaxf(bounds.upper, leaf.vertex1)
+	bounds.upper = _fmaxf(bounds.upper, leaf.vertex2)
 	return bounds
 }
 

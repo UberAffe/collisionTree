@@ -39,14 +39,14 @@ ShapeType :: union {
 }
 
 Ray :: struct {
-	O, D: fl3,
-	t:    f32,
+	O, D, rD: fl3,
+	t:        f32,
 }
 
-Hit :: struct{
-	rayID:uint,
+Hit :: struct {
+	rayID:   uint,
 	shapeID: int,
-	dist: f32
+	dist:    f32,
 }
 
 BVHNode :: struct #align (4) {
@@ -75,9 +75,10 @@ CollisionTree :: struct {
 	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
 	rootNodeIdx: uint `json:"rootNodeIdx"`,
 	nodesUsed:   uint `json:"nodesUsed"`,
+	splitChecks: uint `json:"splitChecks"`,
+	longestOnly: bool `json:"longestOnly"`
 }
 
-num_CPU: int
 dyn_pool: mem.Dynamic_Pool
 pool_allocator: mem.Allocator
 pool: thread.Pool
@@ -86,25 +87,10 @@ contexts: [dynamic]ThreadContext
 commsAllocator: mem.Allocator
 comms: chan.Chan(ThreadContext)
 g_logger: log.Logger
-freeAllocators: [dynamic]mem.Allocator
 runChanAlloc: mem.Allocator
 runChan: chan.Chan(mem.Allocator)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
-// jsMarshalOptions := js.Marshal_Options {
-// 	.JSON5,
-// 	false,
-// 	false,
-// 	0,
-// 	false,
-// 	true,
-// 	false,
-// 	false,
-// 	true,
-// 	0,
-// 	false,
-// 	false,
-// }
 
 
 collisionTreeInit :: proc(threadCount: int = 1) {
@@ -112,11 +98,18 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 	completeGroup = new(sync.Wait_Group)
 	freeMutex = new(sync.Mutex)
 	runChanAlloc = _newArenaAllocator()
-	freeAllocators = make([dynamic]mem.Allocator)
-	num_CPU = threadCount
+	err: runtime.Allocator_Error
+	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), threadCount, runChanAlloc)
+	assert(err == .None)
+	fmt.println(threadCount)
+	fmt.println(chan.can_send(runChan))
+	for i in 0 ..< threadCount {
+		chan.send(chan.as_send(runChan), _newArenaAllocator())
+	}
+	fmt.println("finished prepping runChan")
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
-	thread.pool_init(&pool, pool_allocator, num_CPU)
+	thread.pool_init(&pool, pool_allocator, threadCount)
 	thread.pool_start(&pool)
 }
 
@@ -127,11 +120,6 @@ collistionTreeCleanup :: proc() {
 		free_all(run.allocator)
 		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)run.allocator.data)
 	}
-	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
-	for al in freeAllocators {
-		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)al.data)
-	}
-	delete(freeAllocators)
 	thread.pool_shutdown(&pool)
 	thread.pool_destroy(&pool)
 	free_all(pool_allocator)
@@ -151,36 +139,31 @@ isBatchComplete :: proc(timeOut: time.Duration = 1_000_000) -> bool {
 	return sync.wait_group_wait_with_timeout(completeGroup, timeOut)
 }
 
+//Don't call this again until the chanReceiver is done
 collisionTreeBatchedRayScan :: proc(
 	colTree: ^CollisionTree,
 	rays: []Ray,
-	maxBatchSize := 640,
+	maxBatchSize: int,
 ) -> (
 	chan.Chan(ThreadContext, .Recv),
 	int,
 ) {
+	// free_all(pool_allocator)
 	free_all(commsAllocator)
 	chan.close(comms)
 	chan.destroy(comms)
 	delete(runners)
-	for c in contexts{
+	for c in contexts {
 		delete(c.hit)
 	}
 	delete(contexts)
 	offset: uint = 0
 	maxEnd := uint(len(rays))
-	scanSize = math.min(maxEnd / uint(num_CPU), uint(maxBatchSize))
+	scanSize = uint(maxBatchSize)
 	tCount := maxEnd / scanSize
 	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
 	comms = c
-	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), num_CPU, runChanAlloc)
-	assert(err == .None)
-	defer chan.close(runChan)
-	defer chan.destroy(runChan)
-	for i in 0 ..< num_CPU {
-		chan.send(runChan, _newArenaAllocator())
-	}
 	runners = make([dynamic]TaskRunner, tCount, tCount)
 	contexts = make([dynamic]ThreadContext, tCount, tCount)
 	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
@@ -211,7 +194,9 @@ _newArenaAllocator :: proc() -> mem.Allocator {
 }
 
 _threadScan :: proc(task: thread.Task) {
-	context.allocator = task.allocator
+	// ok:bool
+	context.allocator = task.allocator //chan.recv(runChan)
+	// assert(ok)
 	tc := (cast(^ThreadContext)task.data)^
 	// context.logger = g_logger
 	fmt.printfln("started %v", task.user_index)
@@ -226,11 +211,17 @@ _threadScan :: proc(task: thread.Task) {
 		tb += b
 		tt += t
 		if ray.t < MAX_F32 && sID >= 0 {
-			key:= uint(i)+tc.offset
-			if key<tc.offset || key>tc.offset+len(tc.rays){
-				fmt.printfln("task %v is attempting to write key %v outside of its range[%v,%v)",task.user_index,key,tc.offset,tc.offset+len(tc.rays))
-			} 
-			append(&tc.hit,Hit{key,sID, ray.t})
+			key := uint(i) + tc.offset
+			if key < tc.offset || key > tc.offset + len(tc.rays) {
+				fmt.printfln(
+					"task %v is attempting to write key %v outside of its range[%v,%v)",
+					task.user_index,
+					key,
+					tc.offset,
+					tc.offset + len(tc.rays),
+				)
+			}
+			append(&tc.hit, Hit{key, sID, ray.t})
 		}
 	}
 	time.stopwatch_stop(&sw)
@@ -380,16 +371,16 @@ _intersectShape :: proc(shape: Shape, ray: ^Ray) {
 _intersectAABBBool :: proc(ray: Ray, b: AABB) -> bool {
 	bmin := b.lower
 	bmax := b.upper
-	tx1 := (bmin.x - ray.O.x) / ray.D.x
-	tx2 := (bmax.x - ray.O.x) / ray.D.x
+	tx1 := (bmin.x - ray.O.x) * ray.rD.x
+	tx2 := (bmax.x - ray.O.x) * ray.rD.x
 	tmin := min(tx1, tx2)
 	tmax := max(tx1, tx2)
-	ty1 := (bmin.y - ray.O.y) / ray.D.y
-	ty2 := (bmax.y - ray.O.y) / ray.D.y
+	ty1 := (bmin.y - ray.O.y) * ray.rD.y
+	ty2 := (bmax.y - ray.O.y) * ray.rD.y
 	tmin = max(tmin, min(ty1, ty2))
 	tmax = min(tmax, max(ty1, ty2))
-	tz1 := (bmin.z - ray.O.z) / ray.D.z
-	tz2 := (bmax.z - ray.O.z) / ray.D.z
+	tz1 := (bmin.z - ray.O.z) * ray.rD.z
+	tz2 := (bmax.z - ray.O.z) * ray.rD.z
 	tmin = max(tmin, min(tz1, tz2))
 	tmax = min(tmax, max(tz1, tz2))
 	return tmax >= tmin && tmin < ray.t && tmax > 0
@@ -397,22 +388,22 @@ _intersectAABBBool :: proc(ray: Ray, b: AABB) -> bool {
 _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	bmin := b.lower
 	bmax := b.upper
-	tx1 := (bmin.x - ray.O.x) / ray.D.x
-	tx2 := (bmax.x - ray.O.x) / ray.D.x
+	tx1 := (bmin.x - ray.O.x) * ray.rD.x
+	tx2 := (bmax.x - ray.O.x) * ray.rD.x
 	tmin := min(tx1, tx2)
 	tmax := max(tx1, tx2)
-	ty1 := (bmin.y - ray.O.y) / ray.D.y
-	ty2 := (bmax.y - ray.O.y) / ray.D.y
+	ty1 := (bmin.y - ray.O.y) * ray.rD.y
+	ty2 := (bmax.y - ray.O.y) * ray.rD.y
 	tmin = max(tmin, min(ty1, ty2))
 	tmax = min(tmax, max(ty1, ty2))
-	tz1 := (bmin.z - ray.O.z) / ray.D.z
-	tz2 := (bmax.z - ray.O.z) / ray.D.z
+	tz1 := (bmin.z - ray.O.z) * ray.rD.z
+	tz2 := (bmax.z - ray.O.z) * ray.rD.z
 	tmin = max(tmin, min(tz1, tz2))
 	tmax = min(tmax, max(tz1, tz2))
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 
-BuildBVH :: proc(inputTri: []^Shape) -> ^CollisionTree {
+BuildBVH :: proc(inputTri: []^Shape, divisionChecks:uint=16, longestOnly:bool=false) -> ^CollisionTree {
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
 	colTree.nodesUsed = 2
@@ -425,6 +416,8 @@ BuildBVH :: proc(inputTri: []^Shape) -> ^CollisionTree {
 	}
 	if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
 	colTree.bvhNode[colTree.rootNodeIdx].triCount = uint(length)
+	colTree.longestOnly=longestOnly
+	colTree.splitChecks=divisionChecks
 	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
 	_Subdivide(colTree, colTree.rootNodeIdx)
 	return colTree
@@ -457,28 +450,8 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
 	fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
-	extent := colTree.bvhNode[nodeIdx].aabb.upper - colTree.bvhNode[nodeIdx].aabb.lower
-	parentCost :=
-		f32(colTree.bvhNode[nodeIdx].triCount) *
-		(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
-	// axis := 0
-	// if extent.y > extent.x do axis = 1
-	// if extent.z > extent[axis] do axis = 2
-	// splitPos := bvhNode[nodeIdx].aabb.lower[axis] + extent[axis] * .5
-	bestAxis := -1
-	bestPos, bestCost: f32 = 0, MAX_F32
-	for axis in 0 ..< 3 {
-		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
-			shape := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
-			candidatePos := shape.centroid[axis]
-			cost := _evaluateSAH(colTree, &colTree.bvhNode[nodeIdx], axis, candidatePos)
-			if (cost < bestCost) {
-				bestPos = candidatePos
-				bestCost = cost
-				bestAxis = axis
-			}
-		}
-	}
+	parentCost := _calculateNodeCost(colTree.bvhNode[nodeIdx])
+	bestAxis, bestPos, bestCost := _findBestSplitPlane(colTree, nodeIdx)
 	if bestCost >= parentCost do return
 	//in place partition
 	i := int(colTree.bvhNode[nodeIdx].leftFirst)
@@ -510,6 +483,37 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
 	_UpdateNodeBounds(colTree, rightChildIdx)
 	_Subdivide(colTree, leftChildIdx)
 	_Subdivide(colTree, rightChildIdx)
+}
+
+_calculateNodeCost :: proc(node: BVHNode) -> f32 {
+	extent := node.aabb.upper - node.aabb.lower
+	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
+}
+_findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: uint) -> (int, f32, f32) {
+	node := &colTree.bvhNode[nodeIdx]
+	bestAxis := -1
+	bestPos, bestCost: f32 = 0, MAX_F32
+	for axis in 0 ..< 3 {
+		boundMin :f32= MAX_F32
+		boundMax :f32= -MAX_F32
+		for i in 0..<node.triCount{
+			s:= colTree.tri[colTree.shapeIdx[node.leftFirst+i]]
+			boundMin=math.min(boundMin,s.centroid[axis])
+			boundMax=math.max(boundMax,s.centroid[axis])
+		}
+		if boundMin == boundMax do continue
+		scale := (boundMax - boundMin) / f32(colTree.splitChecks)
+		for i in 0 ..< colTree.splitChecks {
+			candidatePos := boundMin + f32(i) * scale
+			cost := _evaluateSAH(colTree, node, axis, candidatePos)
+			if cost < bestCost {
+				bestPos = candidatePos
+				bestAxis = axis
+				bestCost = cost
+			}
+		}
+	}
+	return bestAxis, bestPos, bestCost
 }
 
 _evaluateSAH :: proc(colTree: ^CollisionTree, node: ^BVHNode, axis: int, pos: f32) -> f32 {

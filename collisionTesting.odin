@@ -65,7 +65,7 @@ main :: proc() {
 	if tree == nil {
 		fmt.println("Building BVH")
 		time.stopwatch_start(&bWatch)
-		tree = ct.BuildBVH(inputTri, 60, true)
+		tree = ct.BuildBVH(inputTri, 24, true)
 		time.stopwatch_stop(&bWatch)
 		fmt.println("BVH built")
 		ct.saveBVH("model.bvh", tree)
@@ -147,8 +147,8 @@ FullDepthScan :: proc(task: thread.Task) {
 		//this call blocks until a message is recieved.
 		data, ok := chan.recv(recvComms)
 		assert(ok)
-		for len(data.hit) > 0 {
-			hit := pop(&data.hit)
+		for hit in data.hit {
+			// hit := pop(&data.hit)
 			if hit.rayID < data.offset || hit.rayID - data.offset >= len(data.rays) {
 				fmt.printfln(
 					"ray %v with offset %v from task %v",
@@ -159,7 +159,7 @@ FullDepthScan :: proc(task: thread.Task) {
 			}
 			v: u8 = u8(500 - data.rays[hit.rayID - data.offset].t * 55)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
-			free(&hit)
+			// free(&hit)
 		}
 		searchTime += data.searchTime
 	}

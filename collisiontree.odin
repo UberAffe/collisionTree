@@ -167,9 +167,9 @@ collisionTreeBatchedRayScan :: proc(
 	runners = make([dynamic]TaskRunner, tCount, tCount)
 	contexts = make([dynamic]ThreadContext, tCount, tCount)
 	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
-	fmt.println("adding to waitgroup")
+	// fmt.println("adding to waitgroup")
 	sync.wait_group_add(completeGroup, int(tCount))
-	fmt.printfln("added %v to wait group", tCount)
+	// fmt.printfln("added %v to wait group", tCount)
 	for &run, i in runners {
 		ok: bool
 		run.task = _threadScan
@@ -199,7 +199,7 @@ _threadScan :: proc(task: thread.Task) {
 	// assert(ok)
 	tc := (cast(^ThreadContext)task.data)^
 	// context.logger = g_logger
-	fmt.printfln("started %v", task.user_index)
+	// fmt.printfln("started %v", task.user_index)
 	// if true do return
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
@@ -226,20 +226,20 @@ _threadScan :: proc(task: thread.Task) {
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
-	fmt.printfln(
-		"thread %v hit %v/%v rays among %v b and %v s in %v",
-		task.user_index,
-		len(tc.hit),
-		len(tc.rays),
-		tb,
-		tt,
-		tc.searchTime,
-	)
+	// fmt.printfln(
+	// 	"thread %v hit %v/%v rays among %v b and %v s in %v",
+	// 	task.user_index,
+	// 	len(tc.hit),
+	// 	len(tc.rays),
+	// 	tb,
+	// 	tt,
+	// 	tc.searchTime,
+	// )
 	chan.send(comms, tc)
 	free_all(runners[task.user_index].allocator)
 	chan.send(runChan, runners[task.user_index].allocator)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
-	fmt.printfln("task %v is fully complete", task.user_index)
+	// fmt.printfln("task %v is fully complete", task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
@@ -425,7 +425,7 @@ BuildBVH :: proc(inputTri: []^Shape, divisionChecks:uint=16, longestOnly:bool=fa
 
 _UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
 	colTree.bvhNode[nodeIdx].aabb = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
-	fmt.println(colTree.bvhNode[nodeIdx].triCount)
+	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
 		_GrowAABB(&colTree.bvhNode[nodeIdx], s.aabb)
@@ -447,7 +447,7 @@ _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
 }
 
 _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
-	fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
+	// fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
 	parentCost := _calculateNodeCost(colTree.bvhNode[nodeIdx])
@@ -489,8 +489,14 @@ _calculateNodeCost :: proc(node: BVHNode) -> f32 {
 	extent := node.aabb.upper - node.aabb.lower
 	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
 }
+Bin::struct{
+	bounds:AABB,
+	triCount:uint
+}
 _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: uint) -> (int, f32, f32) {
 	node := &colTree.bvhNode[nodeIdx]
+	bins := make([dynamic]Bin,colTree.splitChecks,colTree.splitChecks)
+	defer delete(bins)
 	bestAxis := -1
 	bestPos, bestCost: f32 = 0, MAX_F32
 	for axis in 0 ..< 3 {
@@ -502,14 +508,41 @@ _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: uint) -> (int, f32
 			boundMax=math.max(boundMax,s.centroid[axis])
 		}
 		if boundMin == boundMax do continue
-		scale := (boundMax - boundMin) / f32(colTree.splitChecks)
-		for i in 0 ..< colTree.splitChecks {
-			candidatePos := boundMin + f32(i) * scale
-			cost := _evaluateSAH(colTree, node, axis, candidatePos)
-			if cost < bestCost {
-				bestPos = candidatePos
-				bestAxis = axis
-				bestCost = cost
+		scale := f32(colTree.splitChecks)/(boundMax - boundMin)
+		for i in 0 ..< node.triCount {
+			s:=colTree.tri[colTree.shapeIdx[node.leftFirst+i]]
+			binIdx:= int(math.min(f32(colTree.splitChecks)-1, (s.centroid[axis]-boundMin)*scale))
+			assert(binIdx>=0)
+			bins[binIdx].triCount+=0
+			_GrowAABB(&bins[binIdx].bounds,s.aabb)
+		}
+		leftArea:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
+		rightArea:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
+		leftcount:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
+		rightcount:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
+		defer delete(leftArea)
+		defer delete(rightArea)
+		defer delete(leftcount)
+		defer delete(rightcount)
+		leftBox,rightBox:AABB={},{}
+		lSum, rSum:f32
+		for i in 0..<colTree.splitChecks-1{
+			lSum+=f32(bins[i].triCount)
+			leftcount[i]=lSum
+			_GrowAABB(&leftBox,bins[i].bounds)
+			leftArea[i]=_areaAABB(leftBox)
+			rSum+=f32(bins[colTree.splitChecks-2-i].triCount)
+			rightcount[colTree.splitChecks-2-i]=rSum
+			_GrowAABB(&rightBox,bins[colTree.splitChecks-2-i].bounds)
+			rightArea[colTree.splitChecks-2-i]=_areaAABB(rightBox)
+		}
+		scale=(boundMax-boundMin)/f32(colTree.splitChecks)
+		for i in 0..<colTree.splitChecks-1{
+			planeCost:= leftcount[i]*leftArea[i]+rightcount[i]*rightArea[i]
+			if planeCost < bestCost{
+				bestAxis=axis
+				bestPos=boundMin+scale*f32((i+1))
+				bestCost=planeCost
 			}
 		}
 	}

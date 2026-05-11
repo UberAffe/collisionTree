@@ -1,0 +1,6 @@
+*.pdb
+*.rdi
+*.exe
+*.bvh
+*.zip
+logs/

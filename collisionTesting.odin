@@ -1,5 +1,6 @@
 package collisiontree
 
+import "core:math"
 import "core:fmt"
 import "core:log"
 import la "core:math/linalg"
@@ -24,31 +25,33 @@ ready := false
 texUpdate:= false
 tree: ^ct.CollisionTree
 searchTime: time.Duration
+searchWatch: time.Stopwatch
 recvComms: chan.Chan(ThreadContext, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 tex:rl.Texture2D
 textureUpdating:^sync.Mutex
+batchCount:=1
 
 
 main :: proc() {
 	fmt.println("Collision Test Started")
-	threadCount := 12
+	threadCount := os.get_processor_core_count()-2
 	a := new(mem.Dynamic_Arena)
 	mem.dynamic_arena_init(a)
-	defer mem.dynamic_arena_destroy(a)
+	// defer mem.dynamic_arena_destroy(a)
 	customPoolAlloc = mem.dynamic_arena_allocator(a)
-	defer free_all(customPoolAlloc)
+	// defer free_all(customPoolAlloc)
 
     textureUpdating= new(sync.Mutex)
-    defer free(textureUpdating)
+    // defer free(textureUpdating)
 
 	customPool = new(thread.Pool)
-	defer thread.pool_destroy(customPool)
+	// defer thread.pool_destroy(customPool)
 	thread.pool_init(customPool, customPoolAlloc, 1)
 	thread.pool_start(customPool)
-	defer thread.pool_shutdown(customPool)
-	defer thread.pool_destroy(customPool)
+	// defer thread.pool_shutdown(customPool)
+	// defer thread.pool_destroy(customPool)
 	collisionTreeInit(threadCount)
 
     pixels=make([dynamic]rl.Color,N*N)
@@ -71,15 +74,18 @@ main :: proc() {
 		ct.saveBVH("model.bvh", tree)
 	}
 
+    rl.SetTargetFPS(30)
     thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
 
 	rl.InitWindow(640, 640, "test")
     tex=rl.LoadTextureFromImage(im)
-    defer rl.UnloadTexture(tex)
-	defer rl.CloseWindow()
+    // defer rl.UnloadTexture(tex)
+	// defer rl.CloseWindow()
 
 	for !rl.WindowShouldClose() {
 		// fmt.println("frame start")
+        if rl.IsKeyDown(.UP) do batchCount= math.min(N,batchCount+1)
+        if rl.IsKeyDown(.DOWN) do batchCount= math.max(1,batchCount-1)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
@@ -90,21 +96,24 @@ main :: proc() {
             texUpdate=true
 			ready = false
 			thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
+            time.stopwatch_reset(&searchWatch)
+            time.stopwatch_start(&searchWatch)
 		}
         if texUpdate {
             texUpdate=false
             rl.UpdateTexture(tex,raw_data(pixels))
         }
 		rl.DrawTexture(tex,0,0,rl.WHITE)
+        rl.DrawRectangle(0,0,3,i32(batchCount),{180,140,140,180})
 		rl.DrawFPS(10, 10)
 		if ready {
 			rl.DrawText(
 				fmt.ctprintf(
-					"build time: %v\ncumulative search time: %v\naverage search time: %v\n409,600 rays across %v threads\ntriangles: %v\nTPR: %v",
+					"build time: %v\ncumulative search time: %v\naverage search time per batch: %v\ntime to display: %v\ntriangles: %v\nTPR: %v",
 					time.stopwatch_duration(bWatch),
 					searchTime,
-					searchTime / time.Duration(threadCount),
-					threadCount,
+					searchTime / time.Duration(batchCount),
+					time.stopwatch_duration(searchWatch),
 					len(inputTri),
 					searchTime / (640 * 640),
 				),
@@ -118,7 +127,8 @@ main :: proc() {
 		rl.EndDrawing()
 	}
 	ct.saveBVH("model.bvh", tree)
-	ct.collistionTreeCleanup()
+    // fmt.println("why is this still open?")
+	// ct.collistionTreeCleanup()
 }
 
 FullDepthScan :: proc(task: thread.Task) {
@@ -142,27 +152,27 @@ FullDepthScan :: proc(task: thread.Task) {
 	}
 	count: int
 	searchTime = 0
-	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], N)
+	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
 	for i in 0 ..< count {
 		//this call blocks until a message is recieved.
 		data, ok := chan.recv(recvComms)
 		assert(ok)
 		for hit in data.hit {
 			// hit := pop(&data.hit)
-			if hit.rayID < data.offset || hit.rayID - data.offset >= len(data.rays) {
+			if hit.rayID < data.offset || hit.rayID - data.offset >= u32(len(data.rays)) {
 				fmt.printfln(
 					"ray %v with offset %v from task %v",
 					hit.rayID,
 					data.offset,
-					data.offset / len(data.rays),
+					data.offset / u32(len(data.rays))
 				)
 			}
 			v: u8 = u8(500 - data.rays[hit.rayID - data.offset].t * 55)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
-			// free(&hit)
 		}
 		searchTime += data.searchTime
 	}
+    time.stopwatch_stop(&searchWatch)
     texUpdate=true
     ready=true
 }

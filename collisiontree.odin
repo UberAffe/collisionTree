@@ -14,12 +14,12 @@ import "core:thread"
 import time "core:time"
 
 MAX_F32 :: 1_000_000_000_000_000_000_000_000_000_000
-scanSize: uint
+scanSize: u32
 
 fl3 :: [3]f32
-ui2 :: [2]uint
+ui2 :: [2]u32
 
-AABB :: struct #align (4) {
+AABB :: struct {
 	upper: fl3 `json:"upper"`,
 	lower: fl3 `json:"lower"`,
 }
@@ -44,20 +44,20 @@ Ray :: struct {
 }
 
 Hit :: struct {
-	rayID:   uint,
+	rayID:   u32,
 	shapeID: int,
 	dist:    f32,
 }
 
-BVHNode :: struct #align (4) {
-	aabb:      AABB `json:"aabb"`, //3d bounds
-	leftFirst: uint `json:"leftFirst"`,
-	triCount:  uint `json:"triCount"`,
+BVHNode :: struct #align(32){
+	using aabb:      AABB `json:"aabb"`, //3d bounds
+	leftFirst: u32 `json:"leftFirst"`,
+	triCount:  u32 `json:"triCount"`,
 	//total size 32 bytes
 }
 
 ThreadContext :: struct {
-	offset:     uint,
+	offset:     u32,
 	searchTime: time.Duration,
 	colTree:    ^CollisionTree,
 	rays:       []Ray,
@@ -69,13 +69,13 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-CollisionTree :: struct {
+CollisionTree :: struct #align(64){
+	bvhNode:     []BVHNode `json:"bvhNode"`,
 	tri:         []^Shape `json:"-"`,
-	shapeIdx:    []uint `json:"shapeIdx"`,
-	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
-	rootNodeIdx: uint `json:"rootNodeIdx"`,
-	nodesUsed:   uint `json:"nodesUsed"`,
-	splitChecks: uint `json:"splitChecks"`,
+	shapeIdx:    []u32 `json:"shapeIdx"`,
+	rootNodeIdx: u32 `json:"rootNodeIdx"`,
+	nodesUsed:   u32 `json:"nodesUsed"`,
+	splitChecks: u32 `json:"splitChecks"`,
 	longestOnly: bool `json:"longestOnly"`
 }
 
@@ -143,7 +143,7 @@ isBatchComplete :: proc(timeOut: time.Duration = 1_000_000) -> bool {
 collisionTreeBatchedRayScan :: proc(
 	colTree: ^CollisionTree,
 	rays: []Ray,
-	maxBatchSize: int,
+	batchCount: int,
 ) -> (
 	chan.Chan(ThreadContext, .Recv),
 	int,
@@ -157,10 +157,11 @@ collisionTreeBatchedRayScan :: proc(
 		delete(c.hit)
 	}
 	delete(contexts)
-	offset: uint = 0
-	maxEnd := uint(len(rays))
-	scanSize = uint(maxBatchSize)
-	tCount := maxEnd / scanSize
+	offset: u32 = 0
+	maxEnd := u32(len(rays))
+	tCount:= u32(batchCount)
+	scanSize = maxEnd/tCount
+	scanSize= tCount*scanSize<maxEnd ? scanSize+1 : scanSize
 	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
 	comms = c
@@ -181,7 +182,7 @@ collisionTreeBatchedRayScan :: proc(
 		contexts[i].rays = rays[offset:end]
 		contexts[i].offset = offset
 		offset += scanSize
-		contexts[i].hit = make([dynamic]Hit)
+		contexts[i].hit = make([dynamic]Hit,0,scanSize)
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
 	}
 	return chan.as_recv(comms), int(tCount)
@@ -204,21 +205,21 @@ _threadScan :: proc(task: thread.Task) {
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
-	tb: uint = 0
-	tt: uint = 0
+	tb: u32 = 0
+	tt: u32 = 0
 	for &ray, i in tc.rays {
 		b, t, sID := _intersectBVH(tc.colTree, &ray) //, tc.colTree.rootNodeIdx)
 		tb += b
 		tt += t
 		if ray.t < MAX_F32 && sID >= 0 {
-			key := uint(i) + tc.offset
-			if key < tc.offset || key > tc.offset + len(tc.rays) {
+			key := u32(i) + tc.offset
+			if key < tc.offset || key > tc.offset + u32(len(tc.rays)) {
 				fmt.printfln(
 					"task %v is attempting to write key %v outside of its range[%v,%v)",
 					task.user_index,
 					key,
 					tc.offset,
-					tc.offset + len(tc.rays),
+					tc.offset + u32(len(tc.rays))
 				)
 			}
 			append(&tc.hit, Hit{key, sID, ray.t})
@@ -284,14 +285,14 @@ _intersectBVH :: proc {
 _intersectBVHRecursive :: proc(
 	colTree: ^CollisionTree,
 	ray: ^Ray,
-	nodeIdx: uint,
+	nodeIdx: u32,
 ) -> (
-	uint,
-	uint,
+	u32,
+	u32,
 	int,
 ) {
-	bvhIterations := uint(1)
-	triIterations := uint(0)
+	bvhIterations := u32(1)
+	triIterations := u32(0)
 	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations, 0
 	sID := -1
 	if colTree.bvhNode[nodeIdx].triCount > 0 {
@@ -307,7 +308,7 @@ _intersectBVHRecursive :: proc(
 			triIterations += 1
 		}
 	} else {
-		b, t: uint
+		b, t: u32
 		b, t, sID = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst)
 		prevT := ray.t
 		testSID: int
@@ -320,9 +321,9 @@ _intersectBVHRecursive :: proc(
 	}
 	return bvhIterations, triIterations, sID
 }
-_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (uint, uint, int) {
-	bvhIterations := uint(1)
-	triIterations := uint(0)
+_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int) {
+	bvhIterations := u32(1)
+	triIterations := u32(0)
 	node := &colTree.bvhNode[colTree.rootNodeIdx]
 	idStack := make([dynamic]^BVHNode, 0, 64)
 	sID := -1
@@ -403,19 +404,21 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 
-BuildBVH :: proc(inputTri: []^Shape, divisionChecks:uint=16, longestOnly:bool=false) -> ^CollisionTree {
+BuildBVH :: proc(inputTri: []^Shape, divisionChecks:u32=16, longestOnly:bool=false) -> ^CollisionTree {
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
-	colTree.nodesUsed = 2
+	colTree.nodesUsed = 1
 	colTree.tri = inputTri
 	length := len(colTree.tri)
-	colTree.shapeIdx = make([]uint, length)
-	colTree.bvhNode = make([dynamic]BVHNode, 0, 2 * length)
+	// memPadding:= new(i32)
+	colTree.bvhNode = make_slice([]BVHNode,2*length)
+	colTree.shapeIdx = make([]u32, length)
+	//([]BVHNode, 2 * length)
 	for &t, i in colTree.tri {
-		colTree.shapeIdx[i] = uint(i)
+		colTree.shapeIdx[i] = u32(i)
 	}
-	if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
-	colTree.bvhNode[colTree.rootNodeIdx].triCount = uint(length)
+	// if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
+	colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
 	colTree.longestOnly=longestOnly
 	colTree.splitChecks=divisionChecks
 	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
@@ -423,7 +426,7 @@ BuildBVH :: proc(inputTri: []^Shape, divisionChecks:uint=16, longestOnly:bool=fa
 	return colTree
 }
 
-_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
+_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 	colTree.bvhNode[nodeIdx].aabb = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
 	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
@@ -446,7 +449,7 @@ _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
 	node.upper = _fmaxf(node.upper, leaf.upper)
 }
 
-_Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
+_Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 	// fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
@@ -465,18 +468,18 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: uint) {
 		}
 	}
 	//abort split if one side empty
-	leftCount := uint(i) - colTree.bvhNode[nodeIdx].leftFirst
+	leftCount := u32(i) - colTree.bvhNode[nodeIdx].leftFirst
 	if leftCount == 0 || leftCount == colTree.bvhNode[nodeIdx].triCount do return
 	// create child nodes
 	leftChildIdx := colTree.nodesUsed
 	colTree.nodesUsed += 1
 	rightChildIdx := colTree.nodesUsed
 	colTree.nodesUsed += 1
-	for len(colTree.bvhNode) <= int(rightChildIdx) do append(&colTree.bvhNode, BVHNode{})
+	// for len(colTree.bvhNode) <= int(rightChildIdx) do append(&colTree.bvhNode, BVHNode{})
 	colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
 	colTree.bvhNode[nodeIdx].leftFirst = leftChildIdx
 	colTree.bvhNode[leftChildIdx].triCount = leftCount
-	colTree.bvhNode[rightChildIdx].leftFirst = uint(i)
+	colTree.bvhNode[rightChildIdx].leftFirst = u32(i)
 	colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
 	colTree.bvhNode[nodeIdx].triCount = 0
 	_UpdateNodeBounds(colTree, leftChildIdx)
@@ -491,9 +494,9 @@ _calculateNodeCost :: proc(node: BVHNode) -> f32 {
 }
 Bin::struct{
 	bounds:AABB,
-	triCount:uint
+	triCount:u32
 }
-_findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: uint) -> (int, f32, f32) {
+_findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32, f32) {
 	node := &colTree.bvhNode[nodeIdx]
 	bins := make([dynamic]Bin,colTree.splitChecks,colTree.splitChecks)
 	defer delete(bins)

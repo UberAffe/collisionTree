@@ -34,6 +34,7 @@ textureUpdating: ^sync.Mutex
 batchCount := 1
 original: []ct.Shape
 inputTri: []ct.Shape
+bWatch : time.Stopwatch
 r:f32=0
 
 main :: proc() {
@@ -59,15 +60,15 @@ main :: proc() {
 	inputTri= make([]ct.Shape,len(original))
 	copy(inputTri,original)
 	fmt.println("triangles built")
-	bWatch := time.Stopwatch{}
+	bWatch = time.Stopwatch{}
 	// tree = loadBVH("model.bvh", inputTri)
 	// if tree == nil {
-	fmt.println("Building BVH")
-	time.stopwatch_start(&bWatch)
-	tree = ct.BuildBVH(inputTri, 24, true)
-	time.stopwatch_stop(&bWatch)
-	fmt.println("BVH built")
-	ct.saveBVH("model.bvh", tree)
+	// fmt.println("Building BVH")
+	// time.stopwatch_start(&bWatch)
+	// tree = ct.BuildBVH(inputTri, 24, true)
+	// time.stopwatch_stop(&bWatch)
+	// fmt.println("BVH built")
+	// ct.saveBVH("model.bvh", tree)
 	// }
 
 	rl.SetTargetFPS(30)
@@ -128,6 +129,13 @@ main :: proc() {
 }
 
 FullDepthScan :: proc(task: thread.Task) {
+	time.stopwatch_reset(&bWatch)
+	time.stopwatch_start(&bWatch)
+	tree = ct.BuildBVH(inputTri, 24, true)
+	defer delete(tree.bvhNode)
+	defer delete(tree.shapeIdx)
+	defer free(tree)
+	time.stopwatch_stop(&bWatch)
 	camPos := fl3{0, 3.5, -4.5}
 	p0 := fl3{-1, 1, 2}
 	p1 := fl3{1, 1, 2}

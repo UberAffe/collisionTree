@@ -71,7 +71,7 @@ TaskRunner :: struct {
 
 CollisionTree :: struct #align(64){
 	bvhNode:     []BVHNode `json:"bvhNode"`,
-	tri:         []^Shape `json:"-"`,
+	tri:         []Shape `json:"-"`,
 	shapeIdx:    []u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
 	nodesUsed:   u32 `json:"nodesUsed"`,
@@ -264,7 +264,7 @@ saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
 	return written
 }
 
-loadBVH :: proc(path: string, inputTri: []^Shape) -> ^CollisionTree {
+loadBVH :: proc(path: string, inputTri: []Shape) -> ^CollisionTree {
 	file, err := os.open(path, {.Create, .Write, .Read})
 	defer os.close(file)
 	if err != nil do return nil
@@ -300,7 +300,7 @@ _intersectBVHRecursive :: proc(
 		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 			testSID := int(colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i])
 			assert(testSID >= 0)
-			_intersectShape(colTree.tri[testSID]^, ray)
+			_intersectShape(colTree.tri[testSID], ray)
 			if ray.t < prevT {
 				prevT = ray.t
 				sID = testSID
@@ -334,7 +334,7 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 				prevT = ray.t
 				curID := int(colTree.shapeIdx[node.leftFirst + i])
 				assert(curID >= 0)
-				_intersectShape(colTree.tri[curID]^, ray)
+				_intersectShape(colTree.tri[curID], ray)
 				if ray.t < prevT do sID = curID
 			}
 			triIterations += node.triCount
@@ -404,7 +404,7 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 
-BuildBVH :: proc(inputTri: []^Shape, divisionChecks:u32=16, longestOnly:bool=false) -> ^CollisionTree {
+BuildBVH :: proc(inputTri: []Shape, divisionChecks:u32=16, longestOnly:bool=false) -> ^CollisionTree {
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
 	colTree.nodesUsed = 1

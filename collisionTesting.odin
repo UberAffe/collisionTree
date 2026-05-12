@@ -32,6 +32,7 @@ customPoolAlloc: mem.Allocator
 tex:rl.Texture2D
 textureUpdating:^sync.Mutex
 batchCount:=1
+original:[]ct.Shape
 
 
 main :: proc() {
@@ -61,7 +62,8 @@ main :: proc() {
     im:= rl.Image{raw_data(pixels),N,N,1,rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 
 	fmt.println("Bulding Test Triangles")
-	inputTri := buildTestTriangles2()
+	original= buildTestTriangles2()
+	inputTri:= original[:]
 	fmt.println("triangles built")
 	bWatch := time.Stopwatch{}
 	// tree = loadBVH("model.bvh", inputTri)
@@ -197,12 +199,12 @@ buildTestTriangles :: proc() -> []^Shape {
 	return input
 }
 
-buildTestTriangles2 :: proc() -> []^Shape {
+buildTestTriangles2 :: proc() -> []Shape {
 	data, err := os.read_entire_file("assets/bigben.tri", context.allocator)
 	defer delete(data, context.allocator)
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)
-	input := make([dynamic]^Shape)
+	input := make([dynamic]Shape)
 	for line in strings.split_lines_iterator(&iterator) {
 		vals: []string
 		vals, err = strings.split(line, " ")
@@ -214,7 +216,7 @@ buildTestTriangles2 :: proc() -> []^Shape {
 			{pointList[3], pointList[4], pointList[5]},
 			{pointList[6], pointList[7], pointList[8]},
 		}
-		s := new(Shape)
+		s := Shape{}
 		s.centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
 		s.aabb = _getTriangleAABB(triangle)
 		s.type = triangle

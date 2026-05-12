@@ -150,10 +150,10 @@ FullDepthScan :: proc(task: thread.Task) {
 			(camPos + p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
 		)
 		ray.rD = 1 / ray.D
-		ray.t = MAX_F32
+		ray.t = math.F32_MAX
 	}
 	for &ray in rays {
-		ray.t = MAX_F32
+		ray.t = math.F32_MAX
 	}
 	count: int
 	searchTime = 0
@@ -247,4 +247,15 @@ buildTestTriangles2 :: proc() -> []Shape {
 		append(&input, s)
 	}
 	return input[:]
+}
+
+_getTriangleAABB :: proc(leaf: ct.Tri) -> AABB {
+	
+	
+	bounds: AABB = {{math.F32_MIN, math.F32_MIN, math.F32_MIN}, {math.F32_MAX, math.F32_MAX, math.F32_MAX}}
+	for v in leaf.vertex {
+		bounds.lower = _fminf(bounds.lower, v)
+		bounds.upper = _fmaxf(bounds.upper, v)
+	}
+	return bounds
 }

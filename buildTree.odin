@@ -1,0 +1,201 @@
+package collisiontree
+
+import "core:math"
+import la "core:math/linalg"
+
+BuildBVH :: proc(
+	inputTri: []Shape,
+	divisionChecks: u32 = 16,
+	longestOnly: bool = false,
+) -> ^CollisionTree {
+	colTree := new(CollisionTree)
+	colTree.rootNodeIdx = 0
+	colTree.nodesUsed = 1
+	colTree.tri = inputTri
+	length := len(colTree.tri)
+	// memPadding:= new(i32)
+	colTree.bvhNode = make_slice([]BVHNode, 2 * length)
+	colTree.shapeIdx = make([]u32, length)
+	//([]BVHNode, 2 * length)
+	for &t, i in colTree.tri {
+		colTree.shapeIdx[i] = u32(i)
+	}
+	// if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
+	colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
+	colTree.longestOnly = longestOnly
+	colTree.splitChecks = divisionChecks
+	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
+	_Subdivide(colTree, colTree.rootNodeIdx)
+	return colTree
+}
+
+_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
+	colTree.bvhNode[nodeIdx].aabb = {{math.F32_MIN, math.F32_MIN, math.F32_MIN}, {math.F32_MAX, math.F32_MAX, math.F32_MAX}}
+	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
+	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
+		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
+		_GrowAABB(&colTree.bvhNode[nodeIdx], s.aabb)
+	}
+}
+
+_GrowAABB :: proc {
+	_growAABBWithBox,
+	_growAABBWithNode,
+}
+
+_growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
+	node.aabb.lower = _fminf(node.aabb.lower, leaf.lower)
+	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
+}
+_growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
+	node.lower = _fminf(node.lower, leaf.lower)
+	node.upper = _fmaxf(node.upper, leaf.upper)
+}
+
+_Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
+	// fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
+	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
+	//determine split axis and position
+	parentCost := _calculateNodeCost(colTree.bvhNode[nodeIdx])
+	bestAxis, bestPos, bestCost := _findBestSplitPlane(colTree, nodeIdx)
+	if bestCost >= parentCost do return
+	//in place partition
+	i := int(colTree.bvhNode[nodeIdx].leftFirst)
+	j := i + int(colTree.bvhNode[nodeIdx].triCount) - 1
+	for i <= j {
+		if colTree.tri[colTree.shapeIdx[i]].centroid[bestAxis] < bestPos {
+			i += 1
+		} else {
+			_swap(&colTree.shapeIdx[i], &colTree.shapeIdx[j])
+			j -= 1
+		}
+	}
+	//abort split if one side empty
+	leftCount := u32(i) - colTree.bvhNode[nodeIdx].leftFirst
+	if leftCount == 0 || leftCount == colTree.bvhNode[nodeIdx].triCount do return
+	// create child nodes
+	leftChildIdx := colTree.nodesUsed
+	colTree.nodesUsed += 1
+	rightChildIdx := colTree.nodesUsed
+	colTree.nodesUsed += 1
+	// for len(colTree.bvhNode) <= int(rightChildIdx) do append(&colTree.bvhNode, BVHNode{})
+	colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
+	colTree.bvhNode[nodeIdx].leftFirst = leftChildIdx
+	colTree.bvhNode[leftChildIdx].triCount = leftCount
+	colTree.bvhNode[rightChildIdx].leftFirst = u32(i)
+	colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
+	colTree.bvhNode[nodeIdx].triCount = 0
+	_UpdateNodeBounds(colTree, leftChildIdx)
+	_UpdateNodeBounds(colTree, rightChildIdx)
+	_Subdivide(colTree, leftChildIdx)
+	_Subdivide(colTree, rightChildIdx)
+}
+
+_calculateNodeCost :: proc(node: BVHNode) -> f32 {
+	extent := node.aabb.upper - node.aabb.lower
+	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
+}
+
+_findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32, f32) {
+	node := &colTree.bvhNode[nodeIdx]
+	bins := make([dynamic]Bin, colTree.splitChecks, colTree.splitChecks)
+	defer delete(bins)
+	bestAxis := -1
+	bestPos, bestCost: f32 = 0, math.F32_MAX
+	for axis in 0 ..< 3 {
+		boundMin: f32 = math.F32_MAX
+		boundMax: f32 = math.F32_MIN
+		for i in 0 ..< node.triCount {
+			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
+			boundMin = math.min(boundMin, s.centroid[axis])
+			boundMax = math.max(boundMax, s.centroid[axis])
+		}
+		if boundMin == boundMax do continue
+		scale := f32(colTree.splitChecks) / (boundMax - boundMin)
+		for i in 0 ..< node.triCount {
+			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
+			binIdx := int(
+				math.min(f32(colTree.splitChecks) - 1, (s.centroid[axis] - boundMin) * scale),
+			)
+			assert(binIdx >= 0)
+			bins[binIdx].triCount += 0
+			_GrowAABB(&bins[binIdx].bounds, s.aabb)
+		}
+		leftArea := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		rightArea := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		leftcount := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		rightcount := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		defer delete(leftArea)
+		defer delete(rightArea)
+		defer delete(leftcount)
+		defer delete(rightcount)
+		leftBox, rightBox: AABB = {}, {}
+		lSum, rSum: f32
+		for i in 0 ..< colTree.splitChecks - 1 {
+			lSum += f32(bins[i].triCount)
+			leftcount[i] = lSum
+			_GrowAABB(&leftBox, bins[i].bounds)
+			leftArea[i] = _areaAABB(leftBox)
+			rSum += f32(bins[colTree.splitChecks - 2 - i].triCount)
+			rightcount[colTree.splitChecks - 2 - i] = rSum
+			_GrowAABB(&rightBox, bins[colTree.splitChecks - 2 - i].bounds)
+			rightArea[colTree.splitChecks - 2 - i] = _areaAABB(rightBox)
+		}
+		scale = (boundMax - boundMin) / f32(colTree.splitChecks)
+		for i in 0 ..< colTree.splitChecks - 1 {
+			planeCost := leftcount[i] * leftArea[i] + rightcount[i] * rightArea[i]
+			if planeCost < bestCost {
+				bestAxis = axis
+				bestPos = boundMin + scale * f32((i + 1))
+				bestCost = planeCost
+			}
+		}
+	}
+	return bestAxis, bestPos, bestCost
+}
+
+_evaluateSAH :: proc(colTree: ^CollisionTree, node: ^BVHNode, axis: int, pos: f32) -> f32 {
+	leftBox, rightBox: AABB
+	leftCount, rightCount: f32 = 0, 0
+	for i in 0 ..< node.triCount {
+		shape := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
+		if shape.centroid[axis] < pos {
+			leftCount += 1
+			_GrowAABB(&leftBox, shape.aabb)
+		} else {
+			rightCount += 1
+			_GrowAABB(&rightBox, shape.aabb)
+		}
+	}
+	cost := leftCount * _areaAABB(leftBox) + rightCount * _areaAABB(rightBox)
+	return cost > 0 ? cost : math.F32_MAX
+}
+
+_areaAABB :: proc(aabb: AABB) -> f32 {
+	e := aabb.upper - aabb.lower
+	return e.x * e.y + e.y * e.z + e.z * e.x
+}
+
+_fminf :: proc(first, second: fl3) -> fl3 {
+	return {min(first.x, second.x), min(first.y, second.y), min(first.z, second.z)}
+}
+_fmaxf :: proc(first, second: fl3) -> fl3 {
+	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
+}
+
+_intersectTri :: proc(triangle: Tri, ray: ^Ray) {
+	edge1 := triangle.vertex[1] - triangle.vertex[0]
+	edge2 := triangle.vertex[2] - triangle.vertex[0]
+	h := la.cross(ray.D, edge2)
+	a := la.dot(edge1, h)
+	if a > -0.0001 && a < 0.0001 do return
+	f := 1 / a
+	s := ray.O - triangle.vertex[0]
+	u := f * la.dot(s, h)
+	if u < 0 || u > 1 do return
+	q := la.cross(s, edge1)
+	v := f * la.dot(ray.D, q)
+	if v < 0 || u + v > 1 do return
+	t := f * la.dot(edge2, q)
+	if t > 0.0001 do ray.t = min(ray.t, t)
+}

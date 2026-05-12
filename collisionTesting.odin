@@ -1,8 +1,8 @@
 package collisiontree
 
-import "core:math"
 import "core:fmt"
 import "core:log"
+import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
@@ -22,91 +22,85 @@ TEST :: 64
 pixels: [dynamic]rl.Color
 rays: [dynamic]ct.Ray
 ready := false
-texUpdate:= false
+texUpdate := false
 tree: ^ct.CollisionTree
 searchTime: time.Duration
 searchWatch: time.Stopwatch
 recvComms: chan.Chan(ThreadContext, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
-tex:rl.Texture2D
-textureUpdating:^sync.Mutex
-batchCount:=1
-original:[]ct.Shape
+tex: rl.Texture2D
+textureUpdating: ^sync.Mutex
+batchCount := 1
+original: []ct.Shape
+inputTri: []ct.Shape
 
 
 main :: proc() {
 	fmt.println("Collision Test Started")
-	threadCount := os.get_processor_core_count()-2
+	threadCount := os.get_processor_core_count() - 2
 	a := new(mem.Dynamic_Arena)
 	mem.dynamic_arena_init(a)
-	// defer mem.dynamic_arena_destroy(a)
 	customPoolAlloc = mem.dynamic_arena_allocator(a)
-	// defer free_all(customPoolAlloc)
-
-    textureUpdating= new(sync.Mutex)
-    // defer free(textureUpdating)
-
+	textureUpdating = new(sync.Mutex)
 	customPool = new(thread.Pool)
-	// defer thread.pool_destroy(customPool)
 	thread.pool_init(customPool, customPoolAlloc, 1)
 	thread.pool_start(customPool)
-	// defer thread.pool_shutdown(customPool)
-	// defer thread.pool_destroy(customPool)
 	collisionTreeInit(threadCount)
 
-    pixels=make([dynamic]rl.Color,N*N)
-    for _,i in pixels{
-        pixels[i]={30,30,30,255}
-    }
-    im:= rl.Image{raw_data(pixels),N,N,1,rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
+	pixels = make([dynamic]rl.Color, N * N)
+	for _, i in pixels {
+		pixels[i] = {30, 30, 30, 255}
+	}
+	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 
 	fmt.println("Bulding Test Triangles")
-	original= buildTestTriangles2()
-	inputTri:= original[:]
+	original = buildTestTriangles2()
+	inputTri= make([]ct.Shape,len(original))
+	copy(inputTri,original)
 	fmt.println("triangles built")
 	bWatch := time.Stopwatch{}
 	// tree = loadBVH("model.bvh", inputTri)
 	// if tree == nil {
-		fmt.println("Building BVH")
-		time.stopwatch_start(&bWatch)
-		tree = ct.BuildBVH(inputTri, 24, true)
-		time.stopwatch_stop(&bWatch)
-		fmt.println("BVH built")
-		ct.saveBVH("model.bvh", tree)
+	fmt.println("Building BVH")
+	time.stopwatch_start(&bWatch)
+	tree = ct.BuildBVH(inputTri, 24, true)
+	time.stopwatch_stop(&bWatch)
+	fmt.println("BVH built")
+	ct.saveBVH("model.bvh", tree)
 	// }
 
-    rl.SetTargetFPS(30)
-    thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
+	rl.SetTargetFPS(30)
+	thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
 
 	rl.InitWindow(640, 640, "test")
-    tex=rl.LoadTextureFromImage(im)
-    // defer rl.UnloadTexture(tex)
+	tex = rl.LoadTextureFromImage(im)
+	// defer rl.UnloadTexture(tex)
 	// defer rl.CloseWindow()
 
 	for !rl.WindowShouldClose() {
 		// fmt.println("frame start")
-        if rl.IsKeyDown(.UP) do batchCount= math.min(N,batchCount+1)
-        if rl.IsKeyDown(.DOWN) do batchCount= math.max(1,batchCount-1)
+		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
+		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		if rl.IsMouseButtonPressed(.LEFT) || rl.IsKeyPressed(.SPACE) {
-			for _,i in pixels {
-				pixels[i]={30,30,30,255}
+			for _, i in pixels {
+				pixels[i] = {30, 30, 30, 255}
 			}
-            texUpdate=true
+			texUpdate = true
 			ready = false
 			thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
-            time.stopwatch_reset(&searchWatch)
-            time.stopwatch_start(&searchWatch)
+			time.stopwatch_reset(&searchWatch)
+			time.stopwatch_start(&searchWatch)
 		}
-        if texUpdate {
-            texUpdate=false
-            rl.UpdateTexture(tex,raw_data(pixels))
-        }
-		rl.DrawTexture(tex,0,0,rl.WHITE)
-        rl.DrawRectangle(0,0,3,i32(batchCount),{180,140,140,180})
+		if texUpdate {
+			texUpdate = false
+			rl.UpdateTexture(tex, raw_data(pixels))
+		}
+		rl.DrawTexture(tex, 0, 0, rl.WHITE)
+		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
 		rl.DrawFPS(10, 10)
 		if ready {
 			rl.DrawText(
@@ -129,24 +123,24 @@ main :: proc() {
 		rl.EndDrawing()
 	}
 	ct.saveBVH("model.bvh", tree)
-    // fmt.println("why is this still open?")
+	// fmt.println("why is this still open?")
 	// ct.collistionTreeCleanup()
 }
 
 FullDepthScan :: proc(task: thread.Task) {
-	camPos := fl3{0,3.5,-4.5}
-	p0 := fl3{-1,1,2}
-	p1 := fl3{1,1,2}
-	p2 := fl3{-1,-1,2}
+	camPos := fl3{0, 3.5, -4.5}
+	p0 := fl3{-1, 1, 2}
+	p1 := fl3{1, 1, 2}
+	p2 := fl3{-1, -1, 2}
 	rays := make([dynamic]Ray, 640 * 640, 640 * 640)
 	for &ray, i in rays {
 		y := uint(i) / 640
 		x := uint(i) % 640
 		ray.O = camPos
 		ray.D = la.normalize(
-			(camPos+p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
+			(camPos + p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
 		)
-        ray.rD = 1/ray.D
+		ray.rD = 1 / ray.D
 		ray.t = MAX_F32
 	}
 	for &ray in rays {
@@ -166,17 +160,17 @@ FullDepthScan :: proc(task: thread.Task) {
 					"ray %v with offset %v from task %v",
 					hit.rayID,
 					data.offset,
-					data.offset / u32(len(data.rays))
+					data.offset / u32(len(data.rays)),
 				)
 			}
-			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t-4) * 180)
+			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t - 4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
 		searchTime += data.searchTime
 	}
-    time.stopwatch_stop(&searchWatch)
-    texUpdate=true
-    ready=true
+	time.stopwatch_stop(&searchWatch)
+	texUpdate = true
+	ready = true
 }
 
 buildTestTriangles :: proc() -> []^Shape {

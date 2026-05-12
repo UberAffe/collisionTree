@@ -31,7 +31,7 @@ Shape :: struct {
 }
 
 Tri :: struct {
-	vertex0, vertex1, vertex2: fl3,
+	vertex: [3]fl3,
 }
 
 ShapeType :: union {
@@ -49,10 +49,10 @@ Hit :: struct {
 	dist:    f32,
 }
 
-BVHNode :: struct #align(32){
-	using aabb:      AABB `json:"aabb"`, //3d bounds
-	leftFirst: u32 `json:"leftFirst"`,
-	triCount:  u32 `json:"triCount"`,
+BVHNode :: struct #align (32) {
+	using aabb: AABB `json:"aabb"`, //3d bounds
+	leftFirst:  u32 `json:"leftFirst"`,
+	triCount:   u32 `json:"triCount"`,
 	//total size 32 bytes
 }
 
@@ -69,14 +69,14 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-CollisionTree :: struct #align(64){
+CollisionTree :: struct #align (64) {
 	bvhNode:     []BVHNode `json:"bvhNode"`,
 	tri:         []Shape `json:"-"`,
 	shapeIdx:    []u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
 	nodesUsed:   u32 `json:"nodesUsed"`,
 	splitChecks: u32 `json:"splitChecks"`,
-	longestOnly: bool `json:"longestOnly"`
+	longestOnly: bool `json:"longestOnly"`,
 }
 
 dyn_pool: mem.Dynamic_Pool
@@ -159,9 +159,9 @@ collisionTreeBatchedRayScan :: proc(
 	delete(contexts)
 	offset: u32 = 0
 	maxEnd := u32(len(rays))
-	tCount:= u32(batchCount)
-	scanSize = maxEnd/tCount
-	scanSize= tCount*scanSize<maxEnd ? scanSize+1 : scanSize
+	tCount := u32(batchCount)
+	scanSize = maxEnd / tCount
+	scanSize = tCount * scanSize < maxEnd ? scanSize + 1 : scanSize
 	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
 	comms = c
@@ -182,7 +182,7 @@ collisionTreeBatchedRayScan :: proc(
 		contexts[i].rays = rays[offset:end]
 		contexts[i].offset = offset
 		offset += scanSize
-		contexts[i].hit = make([dynamic]Hit,0,scanSize)
+		contexts[i].hit = make([dynamic]Hit, 0, scanSize)
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
 	}
 	return chan.as_recv(comms), int(tCount)
@@ -219,7 +219,7 @@ _threadScan :: proc(task: thread.Task) {
 					task.user_index,
 					key,
 					tc.offset,
-					tc.offset + u32(len(tc.rays))
+					tc.offset + u32(len(tc.rays)),
 				)
 			}
 			append(&tc.hit, Hit{key, sID, ray.t})
@@ -404,14 +404,18 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX_F32
 }
 
-BuildBVH :: proc(inputTri: []Shape, divisionChecks:u32=16, longestOnly:bool=false) -> ^CollisionTree {
+BuildBVH :: proc(
+	inputTri: []Shape,
+	divisionChecks: u32 = 16,
+	longestOnly: bool = false,
+) -> ^CollisionTree {
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
 	colTree.nodesUsed = 1
 	colTree.tri = inputTri
 	length := len(colTree.tri)
 	// memPadding:= new(i32)
-	colTree.bvhNode = make_slice([]BVHNode,2*length)
+	colTree.bvhNode = make_slice([]BVHNode, 2 * length)
 	colTree.shapeIdx = make([]u32, length)
 	//([]BVHNode, 2 * length)
 	for &t, i in colTree.tri {
@@ -419,8 +423,8 @@ BuildBVH :: proc(inputTri: []Shape, divisionChecks:u32=16, longestOnly:bool=fals
 	}
 	// if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
 	colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
-	colTree.longestOnly=longestOnly
-	colTree.splitChecks=divisionChecks
+	colTree.longestOnly = longestOnly
+	colTree.splitChecks = divisionChecks
 	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
 	_Subdivide(colTree, colTree.rootNodeIdx)
 	return colTree
@@ -492,60 +496,62 @@ _calculateNodeCost :: proc(node: BVHNode) -> f32 {
 	extent := node.aabb.upper - node.aabb.lower
 	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
 }
-Bin::struct{
-	bounds:AABB,
-	triCount:u32
+Bin :: struct {
+	bounds:   AABB,
+	triCount: u32,
 }
 _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32, f32) {
 	node := &colTree.bvhNode[nodeIdx]
-	bins := make([dynamic]Bin,colTree.splitChecks,colTree.splitChecks)
+	bins := make([dynamic]Bin, colTree.splitChecks, colTree.splitChecks)
 	defer delete(bins)
 	bestAxis := -1
 	bestPos, bestCost: f32 = 0, MAX_F32
 	for axis in 0 ..< 3 {
-		boundMin :f32= MAX_F32
-		boundMax :f32= -MAX_F32
-		for i in 0..<node.triCount{
-			s:= colTree.tri[colTree.shapeIdx[node.leftFirst+i]]
-			boundMin=math.min(boundMin,s.centroid[axis])
-			boundMax=math.max(boundMax,s.centroid[axis])
+		boundMin: f32 = MAX_F32
+		boundMax: f32 = -MAX_F32
+		for i in 0 ..< node.triCount {
+			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
+			boundMin = math.min(boundMin, s.centroid[axis])
+			boundMax = math.max(boundMax, s.centroid[axis])
 		}
 		if boundMin == boundMax do continue
-		scale := f32(colTree.splitChecks)/(boundMax - boundMin)
+		scale := f32(colTree.splitChecks) / (boundMax - boundMin)
 		for i in 0 ..< node.triCount {
-			s:=colTree.tri[colTree.shapeIdx[node.leftFirst+i]]
-			binIdx:= int(math.min(f32(colTree.splitChecks)-1, (s.centroid[axis]-boundMin)*scale))
-			assert(binIdx>=0)
-			bins[binIdx].triCount+=0
-			_GrowAABB(&bins[binIdx].bounds,s.aabb)
+			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
+			binIdx := int(
+				math.min(f32(colTree.splitChecks) - 1, (s.centroid[axis] - boundMin) * scale),
+			)
+			assert(binIdx >= 0)
+			bins[binIdx].triCount += 0
+			_GrowAABB(&bins[binIdx].bounds, s.aabb)
 		}
-		leftArea:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
-		rightArea:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
-		leftcount:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
-		rightcount:=make([dynamic]f32,colTree.splitChecks,colTree.splitChecks)
+		leftArea := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		rightArea := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		leftcount := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
+		rightcount := make([dynamic]f32, colTree.splitChecks, colTree.splitChecks)
 		defer delete(leftArea)
 		defer delete(rightArea)
 		defer delete(leftcount)
 		defer delete(rightcount)
-		leftBox,rightBox:AABB={},{}
-		lSum, rSum:f32
-		for i in 0..<colTree.splitChecks-1{
-			lSum+=f32(bins[i].triCount)
-			leftcount[i]=lSum
-			_GrowAABB(&leftBox,bins[i].bounds)
-			leftArea[i]=_areaAABB(leftBox)
-			rSum+=f32(bins[colTree.splitChecks-2-i].triCount)
-			rightcount[colTree.splitChecks-2-i]=rSum
-			_GrowAABB(&rightBox,bins[colTree.splitChecks-2-i].bounds)
-			rightArea[colTree.splitChecks-2-i]=_areaAABB(rightBox)
+		leftBox, rightBox: AABB = {}, {}
+		lSum, rSum: f32
+		for i in 0 ..< colTree.splitChecks - 1 {
+			lSum += f32(bins[i].triCount)
+			leftcount[i] = lSum
+			_GrowAABB(&leftBox, bins[i].bounds)
+			leftArea[i] = _areaAABB(leftBox)
+			rSum += f32(bins[colTree.splitChecks - 2 - i].triCount)
+			rightcount[colTree.splitChecks - 2 - i] = rSum
+			_GrowAABB(&rightBox, bins[colTree.splitChecks - 2 - i].bounds)
+			rightArea[colTree.splitChecks - 2 - i] = _areaAABB(rightBox)
 		}
-		scale=(boundMax-boundMin)/f32(colTree.splitChecks)
-		for i in 0..<colTree.splitChecks-1{
-			planeCost:= leftcount[i]*leftArea[i]+rightcount[i]*rightArea[i]
-			if planeCost < bestCost{
-				bestAxis=axis
-				bestPos=boundMin+scale*f32((i+1))
-				bestCost=planeCost
+		scale = (boundMax - boundMin) / f32(colTree.splitChecks)
+		for i in 0 ..< colTree.splitChecks - 1 {
+			planeCost := leftcount[i] * leftArea[i] + rightcount[i] * rightArea[i]
+			if planeCost < bestCost {
+				bestAxis = axis
+				bestPos = boundMin + scale * f32((i + 1))
+				bestCost = planeCost
 			}
 		}
 	}
@@ -591,23 +597,27 @@ _fmaxf :: proc(first, second: fl3) -> fl3 {
 
 _getTriangleAABB :: proc(leaf: Tri) -> AABB {
 	bounds: AABB = {{-MAX_F32, -MAX_F32, -MAX_F32}, {MAX_F32, MAX_F32, MAX_F32}}
-	bounds.lower = _fminf(bounds.lower, leaf.vertex0)
-	bounds.lower = _fminf(bounds.lower, leaf.vertex1)
-	bounds.lower = _fminf(bounds.lower, leaf.vertex2)
-	bounds.upper = _fmaxf(bounds.upper, leaf.vertex0)
-	bounds.upper = _fmaxf(bounds.upper, leaf.vertex1)
-	bounds.upper = _fmaxf(bounds.upper, leaf.vertex2)
+	for v in leaf.vertex {
+		bounds.lower = _fminf(bounds.lower, v)
+		bounds.upper = _fmaxf(bounds.upper, v)
+	}
+	// bounds.lower = _fminf(bounds.lower, leaf.vertex0)
+	// bounds.lower = _fminf(bounds.lower, leaf.vertex1)
+	// bounds.lower = _fminf(bounds.lower, leaf.vertex2)
+	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex0)
+	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex1)
+	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex2)
 	return bounds
 }
 
 _intersectTri :: proc(triangle: Tri, ray: ^Ray) {
-	edge1 := triangle.vertex1 - triangle.vertex0
-	edge2 := triangle.vertex2 - triangle.vertex0
+	edge1 := triangle.vertex[1] - triangle.vertex[0]
+	edge2 := triangle.vertex[2] - triangle.vertex[0]
 	h := la.cross(ray.D, edge2)
 	a := la.dot(edge1, h)
 	if a > -0.0001 && a < 0.0001 do return
 	f := 1 / a
-	s := ray.O - triangle.vertex0
+	s := ray.O - triangle.vertex[0]
 	u := f * la.dot(s, h)
 	if u < 0 || u > 1 do return
 	q := la.cross(s, edge1)

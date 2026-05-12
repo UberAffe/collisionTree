@@ -34,7 +34,7 @@ textureUpdating: ^sync.Mutex
 batchCount := 1
 original: []ct.Shape
 inputTri: []ct.Shape
-
+r:f32=0
 
 main :: proc() {
 	fmt.println("Collision Test Started")
@@ -174,6 +174,28 @@ FullDepthScan :: proc(task: thread.Task) {
 	ready = true
 }
 
+animate::proc(){
+	r+=.05
+	if r>math.TAU do r-=math.TAU
+	a:= math.sin(r)*.5
+	for i in 0..<N{
+		for j in 0..<3{
+			o:ct.fl3
+			switch type in original[i].type{
+				case Tri:
+					o=type.vertex[j]
+			}
+			s:= a*(o.y-.2)*.2
+			x:=o.x*math.cos(s)-o.y*math.sin(s)
+			y:= o.x*math.sin(s)+ o.y*math.cos(s)
+			switch &type in inputTri[i].type{
+				case Tri:
+					type.vertex[j]=ct.fl3{x,y,o.z}
+			}
+		}
+	}
+}
+
 buildTestTriangles :: proc() -> []^Shape {
 	input := make([]^Shape, TEST)
 	rand.reset(12345678910)
@@ -183,13 +205,13 @@ buildTestTriangles :: proc() -> []^Shape {
 		r0 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r1 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r2 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
-		triangle.vertex0 = r0 //r0 * 9 - fl3{5, 5, 5}
-		triangle.vertex1 = r1 //triangle.vertex0 + r1 * 2
-		triangle.vertex2 = r2 //triangle.vertex0 + r2 * 2
+		triangle.vertex[0] = r0 //r0 * 9 - fl3{5, 5, 5}
+		triangle.vertex[1] = r1 //triangle.vertex0 + r1 * 2
+		triangle.vertex[2] = r2 //triangle.vertex0 + r2 * 2
 		input[i] = new(Shape)
 		input[i].aabb = _getTriangleAABB(triangle)
 		input[i].type = triangle
-		input[i].centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
+		input[i].centroid = (triangle.vertex[0] + triangle.vertex[1] + triangle.vertex[2]) / 3
 	}
 	return input
 }
@@ -206,13 +228,12 @@ buildTestTriangles2 :: proc() -> []Shape {
 		for v, j in vals {
 			pointList[j], _ = strconv.parse_f32(v)
 		}
-		triangle := Tri {
-			{pointList[0], pointList[1], pointList[2]},
-			{pointList[3], pointList[4], pointList[5]},
-			{pointList[6], pointList[7], pointList[8]},
-		}
+		triangle := ct.Tri {}
+		triangle.vertex[0]={pointList[0], pointList[1], pointList[2]}
+		triangle.vertex[1]={pointList[3], pointList[4], pointList[5]}
+		triangle.vertex[2]={pointList[6], pointList[7], pointList[8]}
 		s := Shape{}
-		s.centroid = (triangle.vertex0 + triangle.vertex1 + triangle.vertex2) / 3
+		s.centroid = (triangle.vertex[0] + triangle.vertex[1] + triangle.vertex[2]) / 3
 		s.aabb = _getTriangleAABB(triangle)
 		s.type = triangle
 		append(&input, s)

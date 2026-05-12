@@ -195,13 +195,24 @@ _newArenaAllocator :: proc() -> mem.Allocator {
 }
 
 _threadScan :: proc(task: thread.Task) {
-	// ok:bool
-	context.allocator = task.allocator //chan.recv(runChan)
-	// assert(ok)
-	tc := (cast(^ThreadContext)task.data)^
-	// context.logger = g_logger
-	// fmt.printfln("started %v", task.user_index)
-	// if true do return
+	context.allocator = task.allocator 
+	tc := (cast(^ThreadContext)task.data)
+	_rayScan(tc)
+	chan.send(comms, tc^)
+	free_all(runners[task.user_index].allocator)
+	chan.send(runChan, runners[task.user_index].allocator)
+	sync.wait_group_done(completeGroup) //signal that this task is complete
+}
+_coreScan::proc(colTree: ^CollisionTree,rays: []Ray)->^ThreadContext{
+	tc:= new(ThreadContext)
+	tc.colTree=colTree
+	tc.rays=rays
+	tc.hit= make([dynamic]Hit,0,len(rays))
+	_rayScan(tc)
+	return tc
+}
+
+_rayScan::proc(tc:^ThreadContext){
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
@@ -213,34 +224,20 @@ _threadScan :: proc(task: thread.Task) {
 		tt += t
 		if ray.t < MAX_F32 && sID >= 0 {
 			key := u32(i) + tc.offset
-			if key < tc.offset || key > tc.offset + u32(len(tc.rays)) {
-				fmt.printfln(
-					"task %v is attempting to write key %v outside of its range[%v,%v)",
-					task.user_index,
-					key,
-					tc.offset,
-					tc.offset + u32(len(tc.rays)),
-				)
-			}
+			// if key < tc.offset || key > tc.offset + u32(len(tc.rays)) {
+			// 	fmt.printfln(
+			// 		"task %v is attempting to write key %v outside of its range[%v,%v)",
+			// 		task.user_index,
+			// 		key,
+			// 		tc.offset,
+			// 		tc.offset + u32(len(tc.rays)),
+			// 	)
+			// }
 			append(&tc.hit, Hit{key, sID, ray.t})
 		}
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
-	// fmt.printfln(
-	// 	"thread %v hit %v/%v rays among %v b and %v s in %v",
-	// 	task.user_index,
-	// 	len(tc.hit),
-	// 	len(tc.rays),
-	// 	tb,
-	// 	tt,
-	// 	tc.searchTime,
-	// )
-	chan.send(comms, tc)
-	free_all(runners[task.user_index].allocator)
-	chan.send(runChan, runners[task.user_index].allocator)
-	sync.wait_group_done(completeGroup) //signal that this task is complete
-	// fmt.printfln("task %v is fully complete", task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
@@ -601,12 +598,6 @@ _getTriangleAABB :: proc(leaf: Tri) -> AABB {
 		bounds.lower = _fminf(bounds.lower, v)
 		bounds.upper = _fmaxf(bounds.upper, v)
 	}
-	// bounds.lower = _fminf(bounds.lower, leaf.vertex0)
-	// bounds.lower = _fminf(bounds.lower, leaf.vertex1)
-	// bounds.lower = _fminf(bounds.lower, leaf.vertex2)
-	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex0)
-	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex1)
-	// bounds.upper = _fmaxf(bounds.upper, leaf.vertex2)
 	return bounds
 }
 

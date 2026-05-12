@@ -34,8 +34,8 @@ textureUpdating: ^sync.Mutex
 batchCount := 1
 original: []ct.Shape
 inputTri: []ct.Shape
-bWatch : time.Stopwatch
-r:f32=0
+bWatch: time.Stopwatch
+r: f32 = 0
 
 main :: proc() {
 	fmt.println("Collision Test Started")
@@ -57,30 +57,21 @@ main :: proc() {
 
 	fmt.println("Bulding Test Triangles")
 	original = buildTestTriangles2()
-	inputTri= make([]ct.Shape,len(original))
-	copy(inputTri,original)
+	inputTri = make([]ct.Shape, len(original))
+	copy(inputTri, original)
 	fmt.println("triangles built")
 	bWatch = time.Stopwatch{}
-	// tree = loadBVH("model.bvh", inputTri)
-	// if tree == nil {
-	// fmt.println("Building BVH")
-	// time.stopwatch_start(&bWatch)
-	// tree = ct.BuildBVH(inputTri, 24, true)
-	// time.stopwatch_stop(&bWatch)
-	// fmt.println("BVH built")
-	// ct.saveBVH("model.bvh", tree)
-	// }
 
-	rl.SetTargetFPS(30)
-	thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
+	// rl.SetTargetFPS(30)
+	// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
 
 	rl.InitWindow(640, 640, "test")
 	tex = rl.LoadTextureFromImage(im)
 	// defer rl.UnloadTexture(tex)
 	// defer rl.CloseWindow()
-
 	for !rl.WindowShouldClose() {
 		// fmt.println("frame start")
+		singleCoreDepthScan()
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
 
@@ -128,7 +119,7 @@ main :: proc() {
 	// ct.collistionTreeCleanup()
 }
 
-FullDepthScan :: proc(task: thread.Task) {
+singleCoreDepthScan :: proc() {
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
 	tree = ct.BuildBVH(inputTri, 24, true)
@@ -152,7 +143,49 @@ FullDepthScan :: proc(task: thread.Task) {
 		ray.rD = 1 / ray.D
 		ray.t = MAX_F32
 	}
-	for &ray in rays {
+	count: int
+	searchTime = 0
+	data := ct._coreScan(tree, rays[:])
+	for hit in data.hit {
+		if hit.rayID < data.offset || hit.rayID - data.offset >= u32(len(data.rays)) {
+			fmt.printfln(
+				"ray %v with offset %v from task %v",
+				hit.rayID,
+				data.offset,
+				data.offset / u32(len(data.rays)),
+			)
+		}
+		v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t - 4) * 180)
+		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
+	}
+	searchTime += data.searchTime
+	time.stopwatch_stop(&searchWatch)
+	texUpdate = true
+	ready = true
+}
+
+FullDepthScan :: proc(task: thread.Task) {
+	time.stopwatch_reset(&bWatch)
+	time.stopwatch_start(&bWatch)
+	tree = ct.BuildBVH(inputTri, 24, true)
+	defer delete(tree.bvhNode)
+	defer delete(tree.shapeIdx)
+	defer free(tree)
+	time.stopwatch_stop(&bWatch)
+	camPos := fl3{0, 3.5, -4.5}
+	p0 := fl3{-1, 1, 2}
+	p1 := fl3{1, 1, 2}
+	p2 := fl3{-1, -1, 2}
+	rays := make([dynamic]Ray, 640 * 640, 640 * 640)
+	defer delete(rays)
+	for &ray, i in rays {
+		y := uint(i) / 640
+		x := uint(i) % 640
+		ray.O = camPos
+		ray.D = la.normalize(
+			(camPos + p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
+		)
+		ray.rD = 1 / ray.D
 		ray.t = MAX_F32
 	}
 	count: int
@@ -182,23 +215,23 @@ FullDepthScan :: proc(task: thread.Task) {
 	ready = true
 }
 
-animate::proc(){
-	r+=.05
-	if r>math.TAU do r-=math.TAU
-	a:= math.sin(r)*.5
-	for i in 0..<N{
-		for j in 0..<3{
-			o:ct.fl3
-			switch type in original[i].type{
-				case Tri:
-					o=type.vertex[j]
+animate :: proc() {
+	r += .05
+	if r > math.TAU do r -= math.TAU
+	a := math.sin(r) * .5
+	for i in 0 ..< N {
+		for j in 0 ..< 3 {
+			o: ct.fl3
+			switch type in original[i].type {
+			case Tri:
+				o = type.vertex[j]
 			}
-			s:= a*(o.y-.2)*.2
-			x:=o.x*math.cos(s)-o.y*math.sin(s)
-			y:= o.x*math.sin(s)+ o.y*math.cos(s)
-			switch &type in inputTri[i].type{
-				case Tri:
-					type.vertex[j]=ct.fl3{x,y,o.z}
+			s := a * (o.y - .2) * .2
+			x := o.x * math.cos(s) - o.y * math.sin(s)
+			y := o.x * math.sin(s) + o.y * math.cos(s)
+			switch &type in inputTri[i].type {
+			case Tri:
+				type.vertex[j] = ct.fl3{x, y, o.z}
 			}
 		}
 	}
@@ -236,10 +269,10 @@ buildTestTriangles2 :: proc() -> []Shape {
 		for v, j in vals {
 			pointList[j], _ = strconv.parse_f32(v)
 		}
-		triangle := ct.Tri {}
-		triangle.vertex[0]={pointList[0], pointList[1], pointList[2]}
-		triangle.vertex[1]={pointList[3], pointList[4], pointList[5]}
-		triangle.vertex[2]={pointList[6], pointList[7], pointList[8]}
+		triangle := ct.Tri{}
+		triangle.vertex[0] = {pointList[0], pointList[1], pointList[2]}
+		triangle.vertex[1] = {pointList[3], pointList[4], pointList[5]}
+		triangle.vertex[2] = {pointList[6], pointList[7], pointList[8]}
 		s := Shape{}
 		s.centroid = (triangle.vertex[0] + triangle.vertex[1] + triangle.vertex[2]) / 3
 		s.aabb = _getTriangleAABB(triangle)

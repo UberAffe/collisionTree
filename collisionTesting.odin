@@ -64,15 +64,15 @@ main :: proc() {
 	inputTri := buildTestTriangles2()
 	fmt.println("triangles built")
 	bWatch := time.Stopwatch{}
-	tree = loadBVH("model.bvh", inputTri)
-	if tree == nil {
+	// tree = loadBVH("model.bvh", inputTri)
+	// if tree == nil {
 		fmt.println("Building BVH")
 		time.stopwatch_start(&bWatch)
 		tree = ct.BuildBVH(inputTri, 24, true)
 		time.stopwatch_stop(&bWatch)
 		fmt.println("BVH built")
 		ct.saveBVH("model.bvh", tree)
-	}
+	// }
 
     rl.SetTargetFPS(30)
     thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
@@ -132,17 +132,17 @@ main :: proc() {
 }
 
 FullDepthScan :: proc(task: thread.Task) {
-	camPos := fl3{-1.5, -.2, -2.5}
-	p0 := fl3{-2.5, .8, -.5}
-	p1 := fl3{-.5, .8, -.5}
-	p2 := fl3{-2.5, -1.2, -.5}
+	camPos := fl3{0,3.5,-4.5}
+	p0 := fl3{-1,1,2}
+	p1 := fl3{1,1,2}
+	p2 := fl3{-1,-1,2}
 	rays := make([dynamic]Ray, 640 * 640, 640 * 640)
 	for &ray, i in rays {
 		y := uint(i) / 640
 		x := uint(i) % 640
 		ray.O = camPos
 		ray.D = la.normalize(
-			(p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
+			(camPos+p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
 		)
         ray.rD = 1/ray.D
 		ray.t = MAX_F32
@@ -167,7 +167,7 @@ FullDepthScan :: proc(task: thread.Task) {
 					data.offset / u32(len(data.rays))
 				)
 			}
-			v: u8 = u8(500 - data.rays[hit.rayID - data.offset].t * 55)
+			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t-4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
 		searchTime += data.searchTime
@@ -198,7 +198,7 @@ buildTestTriangles :: proc() -> []^Shape {
 }
 
 buildTestTriangles2 :: proc() -> []^Shape {
-	data, err := os.read_entire_file("assets/unity.tri", context.allocator)
+	data, err := os.read_entire_file("assets/bigben.tri", context.allocator)
 	defer delete(data, context.allocator)
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)

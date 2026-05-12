@@ -133,6 +133,7 @@ FullDepthScan :: proc(task: thread.Task) {
 	p1 := fl3{1, 1, 2}
 	p2 := fl3{-1, -1, 2}
 	rays := make([dynamic]Ray, 640 * 640, 640 * 640)
+	defer delete(rays)
 	for &ray, i in rays {
 		y := uint(i) / 640
 		x := uint(i) % 640

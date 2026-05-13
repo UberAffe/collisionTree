@@ -51,8 +51,7 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 	bvhIterations := u32(1)
 	triIterations := u32(0)
 	node := &colTree.bvhNode[colTree.rootNodeIdx]
-	idStack := make([dynamic]^BVHNode, 0, 64)
-	defer delete(idStack)
+	idStack := [dynamic]^BVHNode{}
 	sID := -1
 	for {
 		if (node.triCount > 0) {

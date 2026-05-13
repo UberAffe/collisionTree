@@ -3,12 +3,20 @@ package collisiontree
 import "core:thread"
 import "core:mem"
 import "core:time"
-fl3 :: [3]f32
+
 ui2 :: [2]u32
+fl3 :: [3]f32
 
 AABB :: struct {
 	upper: fl3 `json:"upper"`,
 	lower: fl3 `json:"lower"`,
+}
+
+BVHNode :: struct #align (32) {
+	using aabb: AABB `json:"aabb"`, //3d bounds
+	leftFirst:  u32 `json:"leftFirst"`,
+	triCount:   u32 `json:"triCount"`,
+	//total size 32 bytes
 }
 
 Shape :: struct {
@@ -39,13 +47,6 @@ Hit :: struct {
 	rayID:   u32,
 	shapeID: int,
 	dist:    f32,
-}
-
-BVHNode :: struct #align (32) {
-	using aabb: AABB `json:"aabb"`, //3d bounds
-	leftFirst:  u32 `json:"leftFirst"`,
-	triCount:   u32 `json:"triCount"`,
-	//total size 32 bytes
 }
 
 ThreadContext :: struct {

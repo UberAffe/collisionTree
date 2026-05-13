@@ -35,7 +35,7 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 	freeMutex = new(sync.Mutex)
 	runChanAlloc = _newArenaAllocator()
 	err: runtime.Allocator_Error
-	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), threadCount, runChanAlloc)
+	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), os.get_processor_core_count(), runChanAlloc)
 	assert(err == .None)
 	fmt.println(threadCount)
 	fmt.println(chan.can_send(runChan))
@@ -135,16 +135,13 @@ _threadScan :: proc(task: thread.Task) {
 	context.allocator = task.allocator //chan.recv(runChan)
 	// assert(ok)
 	tc := (cast(^ThreadContext)task.data)^
-	// context.logger = g_logger
-	// fmt.printfln("started %v", task.user_index)
-	// if true do return
 	tc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	tb: u32 = 0
 	tt: u32 = 0
 	for &ray, i in tc.rays {
-		b, t, sID := _intersectBVH(tc.colTree, &ray) //, tc.colTree.rootNodeIdx)
+		b, t, sID := _intersectBVH(tc.colTree, &ray) //, tc.colTree.rootNodeIdx) // this switchs it back to recursive search
 		tb += b
 		tt += t
 		if ray.t < math.F32_MAX && sID >= 0 {
@@ -163,20 +160,10 @@ _threadScan :: proc(task: thread.Task) {
 	}
 	time.stopwatch_stop(&sw)
 	tc.searchTime = time.stopwatch_duration(sw)
-	// fmt.printfln(
-	// 	"thread %v hit %v/%v rays among %v b and %v s in %v",
-	// 	task.user_index,
-	// 	len(tc.hit),
-	// 	len(tc.rays),
-	// 	tb,
-	// 	tt,
-	// 	tc.searchTime,
-	// )
 	chan.send(comms, tc)
 	free_all(runners[task.user_index].allocator)
 	chan.send(runChan, runners[task.user_index].allocator)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
-	// fmt.printfln("task %v is fully complete", task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {

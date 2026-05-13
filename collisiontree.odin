@@ -37,37 +37,43 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 	err: runtime.Allocator_Error
 	runChan, err = chan.create_buffered(chan.Chan(mem.Allocator), os.get_processor_core_count(), runChanAlloc)
 	assert(err == .None)
-	fmt.println(threadCount)
-	fmt.println(chan.can_send(runChan))
 	for i in 0 ..< threadCount {
 		chan.send(chan.as_send(runChan), _newArenaAllocator())
 	}
-	fmt.println("finished prepping runChan")
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
 	thread.pool_init(&pool, pool_allocator, threadCount)
 	thread.pool_start(&pool)
+	runners = make([dynamic]TaskRunner)
+	contexts = make([dynamic]ThreadContext)
 }
 
 collistionTreeCleanup :: proc() {
-	delete(runners)
-	delete(contexts)
+	chan.close(&comms)
+	chan.destroy(comms)
+	free_all(commsAllocator)
+	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
+	free(completeGroup)
+	free(freeMutex)
 	for run in runners {
 		free_all(run.allocator)
 		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)run.allocator.data)
 	}
+	delete(runners)
+	chan.close(&runChan)
+	chan.destroy(runChan)
+	free_all(runChanAlloc)
+	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)runChanAlloc.data)
+	delete(contexts)
 	thread.pool_shutdown(&pool)
 	thread.pool_destroy(&pool)
 	free_all(pool_allocator)
 	mem.dynamic_pool_destroy(cast(^mem.Dynamic_Pool)pool_allocator.data)
-	chan.destroy(comms)
-	free_all(commsAllocator)
-	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
+	
 }
 
 waitForBatch :: proc() {
 	sync.wait(completeGroup)
-	fmt.println("complete")
 }
 
 //default wait is 1 ms
@@ -80,6 +86,7 @@ collisionTreeBatchedRayScan :: proc(
 	colTree: ^CollisionTree,
 	rays: []Ray,
 	batchCount: int,
+	loc:=#caller_location
 ) -> (
 	chan.Chan(ThreadContext, .Recv),
 	int,
@@ -88,11 +95,9 @@ collisionTreeBatchedRayScan :: proc(
 	free_all(commsAllocator)
 	chan.close(comms)
 	chan.destroy(comms)
-	delete(runners)
 	for c in contexts {
 		delete(c.hit)
 	}
-	delete(contexts)
 	offset: u32 = 0
 	maxEnd := u32(len(rays))
 	tCount := u32(batchCount)
@@ -101,13 +106,14 @@ collisionTreeBatchedRayScan :: proc(
 	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
 	comms = c
-	runners = make([dynamic]TaskRunner, tCount, tCount)
-	contexts = make([dynamic]ThreadContext, tCount, tCount)
+	if len(runners)<int(tCount){
+		resize(&runners, tCount)
+		resize(&contexts,tCount)
+	}
 	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
-	// fmt.println("adding to waitgroup")
 	sync.wait_group_add(completeGroup, int(tCount))
-	// fmt.printfln("added %v to wait group", tCount)
-	for &run, i in runners {
+	for  i in 0..<tCount {
+		run:=&runners[i]
 		ok: bool
 		run.task = _threadScan
 		run.allocator, ok = chan.recv(runChan)
@@ -115,17 +121,20 @@ collisionTreeBatchedRayScan :: proc(
 		contexts[i].offset = 0
 		end := math.min(offset + scanSize, maxEnd)
 		contexts[i].colTree = colTree
+		if offset>end{
+			fmt.println(offset,":",end)
+		}
 		contexts[i].rays = rays[offset:end]
 		contexts[i].offset = offset
 		offset += scanSize
-		contexts[i].hit = make([dynamic]Hit, 0, scanSize)
-		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), i)
+		contexts[i].hit = make([dynamic]Hit, 0, scanSize, loc=loc)
+		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), int(i))
 	}
 	return chan.as_recv(comms), int(tCount)
 }
 
-_newArenaAllocator :: proc() -> mem.Allocator {
-	a := new(mem.Dynamic_Arena)
+_newArenaAllocator :: proc(loc:=#caller_location) -> mem.Allocator {
+	a := new(mem.Dynamic_Arena, loc=loc)
 	mem.dynamic_arena_init(a, alignment = 64)
 	return mem.dynamic_arena_allocator(a)
 }
@@ -144,17 +153,8 @@ _threadScan :: proc(task: thread.Task) {
 		b, t, sID := _intersectBVH(tc.colTree, &ray) //, tc.colTree.rootNodeIdx) // this switchs it back to recursive search
 		tb += b
 		tt += t
-		if ray.t < math.F32_MAX && sID >= 0 {
+		if ray.t < MAX && sID >= 0 {
 			key := u32(i) + tc.offset
-			if key < tc.offset || key > tc.offset + u32(len(tc.rays)) {
-				fmt.printfln(
-					"task %v is attempting to write key %v outside of its range[%v,%v)",
-					task.user_index,
-					key,
-					tc.offset,
-					tc.offset + u32(len(tc.rays)),
-				)
-			}
 			append(&tc.hit, Hit{key, sID, ray.t})
 		}
 	}
@@ -168,11 +168,11 @@ _threadScan :: proc(task: thread.Task) {
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
 	file, err := os.open(path, {.Create, .Write, .Read})
-	defer os.close(file)
 	if err != nil {
 		fmt.printfln("file error: %v", err)
 		return 0
 	}
+	defer os.close(file)
 	binary, encError := enc.marshal(colTree^, {})
 	if encError != nil {
 		fmt.printfln("encoding error:%v", encError)

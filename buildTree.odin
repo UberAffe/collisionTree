@@ -30,7 +30,7 @@ BuildBVH :: proc(
 }
 
 _UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
-	colTree.bvhNode[nodeIdx].aabb = {{math.F32_MIN, math.F32_MIN, math.F32_MIN}, {math.F32_MAX, math.F32_MAX, math.F32_MAX}}
+	colTree.bvhNode[nodeIdx].aabb = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
@@ -101,10 +101,10 @@ _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32,
 	bins := make([dynamic]Bin, colTree.splitChecks, colTree.splitChecks)
 	defer delete(bins)
 	bestAxis := -1
-	bestPos, bestCost: f32 = 0, math.F32_MAX
+	bestPos, bestCost: f32 = 0, MAX
 	for axis in 0 ..< 3 {
-		boundMin: f32 = math.F32_MAX
-		boundMax: f32 = math.F32_MIN
+		boundMin: f32 = MAX
+		boundMax: f32 = MIN
 		for i in 0 ..< node.triCount {
 			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]
 			boundMin = math.min(boundMin, s.centroid[axis])
@@ -168,7 +168,7 @@ _evaluateSAH :: proc(colTree: ^CollisionTree, node: ^BVHNode, axis: int, pos: f3
 		}
 	}
 	cost := leftCount * _areaAABB(leftBox) + rightCount * _areaAABB(rightBox)
-	return cost > 0 ? cost : math.F32_MAX
+	return cost > 0 ? cost : MAX
 }
 
 _areaAABB :: proc(aabb: AABB) -> f32 {

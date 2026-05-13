@@ -1,5 +1,8 @@
 package collisiontree
 
+
+
+
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -38,38 +41,46 @@ bWatch : time.Stopwatch
 r:f32=0
 
 main :: proc() {
-	fmt.println("Collision Test Started")
+	when ODIN_DEBUG{
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track,context.allocator)
+		context.allocator= mem.tracking_allocator(&track)
+		defer {
+			if (len(track.allocation_map)>0){
+				for _, entry in track.allocation_map{
+					fmt.printfln("%v leaked %v bytes\n", entry.location, entry.size)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
 	threadCount := os.get_processor_core_count() - 2
 	a := new(mem.Dynamic_Arena)
+	defer free(a)
 	mem.dynamic_arena_init(a)
 	customPoolAlloc = mem.dynamic_arena_allocator(a)
+	defer free_all(customPoolAlloc)
 	textureUpdating = new(sync.Mutex)
+	defer free(textureUpdating)
 	customPool = new(thread.Pool)
+	defer free(customPool)
 	thread.pool_init(customPool, customPoolAlloc, 1)
 	thread.pool_start(customPool)
 	collisionTreeInit(threadCount)
 
 	pixels = make([dynamic]rl.Color, N * N)
+	defer delete(pixels)
 	for _, i in pixels {
 		pixels[i] = {30, 30, 30, 255}
 	}
 	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 
-	fmt.println("Bulding Test Triangles")
 	original = buildTestTriangles2()
+	defer delete(original)
 	inputTri= make([]ct.Shape,len(original))
+	defer delete(inputTri)
 	copy(inputTri,original)
-	fmt.println("triangles built")
 	bWatch = time.Stopwatch{}
-	// tree = loadBVH("model.bvh", inputTri)
-	// if tree == nil {
-	// fmt.println("Building BVH")
-	// time.stopwatch_start(&bWatch)
-	// tree = ct.BuildBVH(inputTri, 24, true)
-	// time.stopwatch_stop(&bWatch)
-	// fmt.println("BVH built")
-	// ct.saveBVH("model.bvh", tree)
-	// }
 
 	rl.SetTargetFPS(30)
 	thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
@@ -80,7 +91,6 @@ main :: proc() {
 	// defer rl.CloseWindow()
 
 	for !rl.WindowShouldClose() {
-		// fmt.println("frame start")
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
 
@@ -123,15 +133,15 @@ main :: proc() {
 
 		rl.EndDrawing()
 	}
-	ct.saveBVH("model.bvh", tree)
-	// fmt.println("why is this still open?")
+	// ct.saveBVH("model.bvh", tree)
 	// ct.collistionTreeCleanup()
 }
 
 FullDepthScan :: proc(task: thread.Task) {
+	context.allocator=task.allocator
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
-	tree = ct.BuildBVH(inputTri, 24, true)
+	tree = ct.BuildBVH(inputTri, 8, true)
 	defer delete(tree.bvhNode)
 	defer delete(tree.shapeIdx)
 	defer free(tree)
@@ -150,10 +160,10 @@ FullDepthScan :: proc(task: thread.Task) {
 			(camPos + p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
 		)
 		ray.rD = 1 / ray.D
-		ray.t = math.F32_MAX
+		ray.t = MAX
 	}
 	for &ray in rays {
-		ray.t = math.F32_MAX
+		ray.t = MAX
 	}
 	count: int
 	searchTime = 0
@@ -163,15 +173,6 @@ FullDepthScan :: proc(task: thread.Task) {
 		data, ok := chan.recv(recvComms)
 		assert(ok)
 		for hit in data.hit {
-			// hit := pop(&data.hit)
-			if hit.rayID < data.offset || hit.rayID - data.offset >= u32(len(data.rays)) {
-				fmt.printfln(
-					"ray %v with offset %v from task %v",
-					hit.rayID,
-					data.offset,
-					data.offset / u32(len(data.rays)),
-				)
-			}
 			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t - 4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
@@ -189,17 +190,17 @@ animate::proc(){
 	for i in 0..<N{
 		for j in 0..<3{
 			o:ct.fl3
-			switch type in original[i].type{
-				case Tri:
-					o=type.vertex[j]
-			}
+			// switch type in original[i].type{
+			// 	case Tri:
+			// 		o=type.vertex[j]
+			// }
 			s:= a*(o.y-.2)*.2
 			x:=o.x*math.cos(s)-o.y*math.sin(s)
 			y:= o.x*math.sin(s)+ o.y*math.cos(s)
-			switch &type in inputTri[i].type{
-				case Tri:
-					type.vertex[j]=ct.fl3{x,y,o.z}
-			}
+			// switch &type in inputTri[i].type{
+			// 	case Tri:
+			// 		type.vertex[j]=ct.fl3{x,y,o.z}
+			// }
 		}
 	}
 }
@@ -225,13 +226,21 @@ buildTestTriangles :: proc() -> []^Shape {
 }
 
 buildTestTriangles2 :: proc() -> []Shape {
-	data, err := os.read_entire_file("assets/bigben.tri", context.allocator)
-	defer delete(data, context.allocator)
+	err:os.Error
+	data:= #load("assets/bigben.tri",[]byte) or_else []byte{}
+	deletedata:=false
+	fmt.println(len(data))
+	// if data==nil{
+	// 	data, err = os.read_entire_file("assets/bigben.tri", context.allocator)
+	// 	deletedata=true		
+	// }
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)
+	defer delete(pointList)
 	input := make([dynamic]Shape)
 	for line in strings.split_lines_iterator(&iterator) {
 		vals: []string
+		defer delete(vals)
 		vals, err = strings.split(line, " ")
 		for v, j in vals {
 			pointList[j], _ = strconv.parse_f32(v)
@@ -246,13 +255,14 @@ buildTestTriangles2 :: proc() -> []Shape {
 		s.type = triangle
 		append(&input, s)
 	}
+	if deletedata do delete(data)
 	return input[:]
 }
 
 _getTriangleAABB :: proc(leaf: ct.Tri) -> AABB {
 	
 	
-	bounds: AABB = {{math.F32_MIN, math.F32_MIN, math.F32_MIN}, {math.F32_MAX, math.F32_MAX, math.F32_MAX}}
+	bounds: AABB = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 	for v in leaf.vertex {
 		bounds.lower = _fminf(bounds.lower, v)
 		bounds.upper = _fmaxf(bounds.upper, v)

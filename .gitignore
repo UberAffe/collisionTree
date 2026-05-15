@@ -4,3 +4,4 @@
 *.bvh
 *.zip
 logs/
+profiling/

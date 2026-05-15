@@ -5,7 +5,8 @@ import "core:mem"
 import "core:time"
 import "core:math"
 
-MAX:: 1_000_000_000_000_000_000_000_000_000_000// math.F32_MAX
+// MAX:: 1_000_000_000_000_000_000_000_000_000_000
+MAX:: math.F32_MAX
 MIN:: -MAX//math.F32_MAX
 
 ui2 :: [2]u32

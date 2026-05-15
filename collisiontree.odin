@@ -29,8 +29,20 @@ runChan: chan.Chan(mem.Allocator)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
 
-
-//Don't call this again until the chanReceiver is done
+_batchCleanup :: proc() {
+	free_all(commsAllocator)
+	chan.close(comms)
+	chan.destroy(comms)
+	for c in contexts {
+		delete(c.hit)
+	}
+	for &r in runners{
+		r={}
+	}
+}
+// This will automatically call the cleanup process as if it was a defer call from
+// the scope of the calling function
+@(deferred_none = _batchCleanup)
 collisionTreeBatchedRayScan :: proc(
 	colTree: ^CollisionTree,
 	rays: []Ray,
@@ -40,30 +52,14 @@ collisionTreeBatchedRayScan :: proc(
 	chan.Chan(ThreadContext, .Recv),
 	int,
 ) {
-	when PROFILING {
-		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
-		defer delete(buffer_backing)
-
-		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
-		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
-
-		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
-	}
-	// free_all(pool_allocator)
-	free_all(commsAllocator)
-	chan.close(comms)
-	chan.destroy(comms)
-	for c in contexts {
-		delete(c.hit)
-	}
 	offset: u32 = 0
 	maxEnd := u32(len(rays))
 	tCount := u32(batchCount)
 	scanSize = maxEnd / tCount
 	scanSize = tCount * scanSize < maxEnd ? scanSize + 1 : scanSize
-	c, err := chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
+	err: runtime.Allocator_Error
+	comms, err = chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
 	assert(err == .None)
-	comms = c
 	if len(runners) < int(tCount) {
 		resize(&runners, tCount)
 		resize(&contexts, tCount)
@@ -154,9 +150,16 @@ _newArenaAllocator :: proc(loc := #caller_location) -> mem.Allocator {
 }
 
 _threadScan :: proc(task: thread.Task) {
-	// ok:bool
-	context.allocator = task.allocator //chan.recv(runChan)
-	// assert(ok)
+	when PROFILING {
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+	}
+	context.allocator = task.allocator
 	tc := (cast(^ThreadContext)task.data)^
 	tc.searchTime = 0
 	sw := time.Stopwatch{}

@@ -3,7 +3,6 @@ package collisiontree
 import "base:runtime"
 
 
-
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -11,6 +10,7 @@ import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:os"
+import "core:prof/spall"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -18,33 +18,32 @@ import "core:sync/chan"
 import "core:thread"
 import "core:time"
 import rl "vendor:raylib"
-import "core:prof/spall"
 
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
-PROFILING :: #config(profiling, true)
+PROFILING :: #config(profiling, false)
 
-when PROFILING{
+when PROFILING {
 	spall_ctx: spall.Context
 	@(thread_local)
 	spall_buffer: spall.Buffer
 
-	@(instrumentation_enter)
-	spall_enter :: proc "contextless" (
-		proc_address, call_site_return_address: rawptr,
-		loc: runtime.Source_Code_Location
-	) {
-		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
-	}
+	// @(instrumentation_enter)
+	// spall_enter :: proc "contextless" (
+	// 	proc_address, call_site_return_address: rawptr,
+	// 	loc: runtime.Source_Code_Location
+	// ) {
+	// 	spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	// }
 
-	@(instrumentation_exit)
-	spall_exit :: proc "contextless" (
-		proc_address, call_site_return_address: rawptr,
-		loc: runtime.Source_Code_Location,
-	) {
-		spall._buffer_end(&spall_ctx, &spall_buffer)
-	}
+	// @(instrumentation_exit)
+	// spall_exit :: proc "contextless" (
+	// 	proc_address, call_site_return_address: rawptr,
+	// 	loc: runtime.Source_Code_Location,
+	// ) {
+	// 	spall._buffer_end(&spall_ctx, &spall_buffer)
+	// }
 }
 
 pixels: [dynamic]rl.Color
@@ -62,8 +61,8 @@ textureUpdating: ^sync.Mutex
 batchCount := 1
 original: []ct.Shape
 inputTri: []ct.Shape
-bWatch : time.Stopwatch
-r:f32=0
+bWatch: time.Stopwatch
+r: f32 = 0
 
 main :: proc() {
 	when PROFILING {
@@ -78,13 +77,13 @@ main :: proc() {
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
-	when ODIN_DEBUG{
+	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track,context.allocator)
-		context.allocator= mem.tracking_allocator(&track)
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
 		defer {
-			if (len(track.allocation_map)>0){
-				for _, entry in track.allocation_map{
+			if (len(track.allocation_map) > 0) {
+				for _, entry in track.allocation_map {
 					fmt.printfln("%v leaked %v bytes\n", entry.location, entry.size)
 				}
 			}
@@ -114,13 +113,13 @@ main :: proc() {
 
 	original = buildTestTriangles2()
 	defer delete(original)
-	inputTri= make([]ct.Shape,len(original))
+	inputTri = make([]ct.Shape, len(original))
 	defer delete(inputTri)
-	copy(inputTri,original)
+	copy(inputTri, original)
 	bWatch = time.Stopwatch{}
 
-	rl.SetTargetFPS(30)
-	thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
+	// rl.SetTargetFPS(30)
+	// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
 
 	rl.InitWindow(640, 640, "test")
 	tex = rl.LoadTextureFromImage(im)
@@ -130,7 +129,6 @@ main :: proc() {
 	for !rl.WindowShouldClose() {
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
-
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
 		if rl.IsMouseButtonPressed(.LEFT) || rl.IsKeyPressed(.SPACE) {
@@ -139,10 +137,13 @@ main :: proc() {
 			}
 			texUpdate = true
 			ready = false
-			thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
+			// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
 			time.stopwatch_reset(&searchWatch)
 			time.stopwatch_start(&searchWatch)
 		}
+		FullDepthScan()
+		time.stopwatch_reset(&searchWatch)
+		time.stopwatch_start(&searchWatch)
 		if texUpdate {
 			texUpdate = false
 			rl.UpdateTexture(tex, raw_data(pixels))
@@ -170,11 +171,17 @@ main :: proc() {
 
 		rl.EndDrawing()
 	}
+	fmt.println("exiting program")
 	// ct.saveBVH("model.bvh", tree)
 	// ct.collistionTreeCleanup()
 }
 
-FullDepthScan :: proc(task: thread.Task) {
+FullDepthScan :: proc {
+	_threadedFullDepthScan,
+	_fullDepthScan,
+}
+
+_threadedFullDepthScan :: proc(task: thread.Task) {
 	when PROFILING {
 		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
 		defer delete(buffer_backing)
@@ -184,7 +191,12 @@ FullDepthScan :: proc(task: thread.Task) {
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
-	context.allocator=task.allocator
+	context.allocator = task.allocator
+	_fullDepthScan()
+}
+
+_fullDepthScan :: proc() {
+	fmt.println("depthscan started")
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
 	tree = ct.BuildBVH(inputTri, 8, true)
@@ -208,15 +220,15 @@ FullDepthScan :: proc(task: thread.Task) {
 		ray.rD = 1 / ray.D
 		ray.t = MAX
 	}
-	for &ray in rays {
-		ray.t = MAX
-	}
 	count: int
 	searchTime = 0
+	fmt.println("begining search")
 	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
+	fmt.printfln("receiving %v batch results",recvComms)
 	for i in 0 ..< count {
 		//this call blocks until a message is recieved.
 		data, ok := chan.recv(recvComms)
+		fmt.printfln("received: %v",ok)
 		assert(ok)
 		for hit in data.hit {
 			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t - 4) * 180)
@@ -229,20 +241,20 @@ FullDepthScan :: proc(task: thread.Task) {
 	ready = true
 }
 
-animate::proc(){
-	r+=.05
-	if r>math.TAU do r-=math.TAU
-	a:= math.sin(r)*.5
-	for i in 0..<N{
-		for j in 0..<3{
-			o:ct.fl3
+animate :: proc() {
+	r += .05
+	if r > math.TAU do r -= math.TAU
+	a := math.sin(r) * .5
+	for i in 0 ..< N {
+		for j in 0 ..< 3 {
+			o: ct.fl3
 			// switch type in original[i].type{
 			// 	case Tri:
 			// 		o=type.vertex[j]
 			// }
-			s:= a*(o.y-.2)*.2
-			x:=o.x*math.cos(s)-o.y*math.sin(s)
-			y:= o.x*math.sin(s)+ o.y*math.cos(s)
+			s := a * (o.y - .2) * .2
+			x := o.x * math.cos(s) - o.y * math.sin(s)
+			y := o.x * math.sin(s) + o.y * math.cos(s)
 			// switch &type in inputTri[i].type{
 			// 	case Tri:
 			// 		type.vertex[j]=ct.fl3{x,y,o.z}
@@ -272,9 +284,9 @@ buildTestTriangles :: proc() -> []^Shape {
 }
 
 buildTestTriangles2 :: proc() -> []Shape {
-	err:os.Error
-	data:= #load("assets/bigben.tri",[]byte) or_else []byte{}
-	deletedata:=false
+	err: os.Error
+	data := #load("assets/bigben.tri", []byte) or_else []byte{}
+	deletedata := false
 	fmt.println(len(data))
 	// if data==nil{
 	// 	data, err = os.read_entire_file("assets/bigben.tri", context.allocator)
@@ -291,10 +303,10 @@ buildTestTriangles2 :: proc() -> []Shape {
 		for v, j in vals {
 			pointList[j], _ = strconv.parse_f32(v)
 		}
-		triangle := ct.Tri {}
-		triangle.vertex[0]={pointList[0], pointList[1], pointList[2]}
-		triangle.vertex[1]={pointList[3], pointList[4], pointList[5]}
-		triangle.vertex[2]={pointList[6], pointList[7], pointList[8]}
+		triangle := ct.Tri{}
+		triangle.vertex[0] = {pointList[0], pointList[1], pointList[2]}
+		triangle.vertex[1] = {pointList[3], pointList[4], pointList[5]}
+		triangle.vertex[2] = {pointList[6], pointList[7], pointList[8]}
 		s := Shape{}
 		s.centroid = (triangle.vertex[0] + triangle.vertex[1] + triangle.vertex[2]) / 3
 		s.aabb = _getTriangleAABB(triangle)
@@ -306,8 +318,6 @@ buildTestTriangles2 :: proc() -> []Shape {
 }
 
 _getTriangleAABB :: proc(leaf: ct.Tri) -> AABB {
-	
-	
 	bounds: AABB = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 	for v in leaf.vertex {
 		bounds.lower = _fminf(bounds.lower, v)

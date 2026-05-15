@@ -227,6 +227,7 @@ _fullDepthScan :: proc() {
 	fmt.printfln("receiving %v batch results",recvComms)
 	for i in 0 ..< count {
 		//this call blocks until a message is recieved.
+		fmt.println(i)
 		data, ok := chan.recv(recvComms)
 		fmt.printfln("received: %v",ok)
 		assert(ok)

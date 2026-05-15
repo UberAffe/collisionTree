@@ -1,5 +1,6 @@
 package collisiontree
 
+import "base:runtime"
 
 
 
@@ -17,10 +18,34 @@ import "core:sync/chan"
 import "core:thread"
 import "core:time"
 import rl "vendor:raylib"
+import "core:prof/spall"
 
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
+PROFILING :: #config(profiling, true)
+
+when PROFILING{
+	spall_ctx: spall.Context
+	@(thread_local)
+	spall_buffer: spall.Buffer
+
+	@(instrumentation_enter)
+	spall_enter :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location
+	) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
+
+	@(instrumentation_exit)
+	spall_exit :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_end(&spall_ctx, &spall_buffer)
+	}
+}
 
 pixels: [dynamic]rl.Color
 rays: [dynamic]ct.Ray
@@ -41,6 +66,18 @@ bWatch : time.Stopwatch
 r:f32=0
 
 main :: proc() {
+	when PROFILING {
+		spall_ctx = spall.context_create("profiling/ct.spall")
+		defer spall.context_destroy(&spall_ctx)
+
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+	}
 	when ODIN_DEBUG{
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track,context.allocator)
@@ -138,6 +175,15 @@ main :: proc() {
 }
 
 FullDepthScan :: proc(task: thread.Task) {
+	when PROFILING {
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+	}
 	context.allocator=task.allocator
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)

@@ -4,6 +4,7 @@ import "core:thread"
 import "core:mem"
 import "core:time"
 import "core:math"
+import "core:fmt"
 
 // MAX:: 1_000_000_000_000_000_000_000_000_000_000
 MAX:: math.F32_MAX
@@ -56,10 +57,14 @@ Hit :: struct {
 
 ThreadContext :: struct {
 	offset:     u32,
-	searchTime: time.Duration,
 	colTree:    ^CollisionTree,
 	rays:       []Ray,
-	hit:        [dynamic]Hit,
+	rc:   ^ResponseContext,
+}
+
+ResponseContext :: struct{
+	searchTime: time.Duration,
+	hits: 		[dynamic]Hit,
 }
 
 TaskRunner :: struct {
@@ -78,7 +83,11 @@ CollisionTree :: struct #align (64) {
 }
 
 _swap :: proc(first, second: ^$T) {
+	if first==nil do deref()
+	if second==nil do deref()
 	t := first^
 	first^ = second^
 	second^ = t
 }
+
+deref::proc(loc:=#caller_location){fmt.println("deref at:",loc)}

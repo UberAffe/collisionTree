@@ -18,6 +18,7 @@ _intersectBVHRecursive :: proc(
 ) {
 	bvhIterations: u32 = 1
 	triIterations: u32 = 0
+	if ray==nil do deref()
 	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations, 0
 	sID := -1
 	if colTree.bvhNode[nodeIdx].triCount > 0 {
@@ -71,6 +72,7 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 		}
 		child1 := &colTree.bvhNode[node.leftFirst]
 		child2 := &colTree.bvhNode[node.leftFirst + 1]
+		if ray==nil do deref()
 		dist1 := _intersectAABBFloat(ray^, child1.aabb)
 		dist2 := _intersectAABBFloat(ray^, child2.aabb)
 		bvhIterations += 2

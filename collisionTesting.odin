@@ -235,7 +235,7 @@ _fullDepthScan :: proc() {
 	fmt.printfln("receiving %v batch results",recvComms)
 	for !ct.isBatchComplete() {
 		//this call blocks until a message is recieved.
-		fmt.println(i)
+		// fmt.println(i)
 		data, ok := chan.recv(recvComms)
 		fmt.print(".")
 		assert(ok)

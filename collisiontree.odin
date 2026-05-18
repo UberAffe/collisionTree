@@ -26,15 +26,16 @@ runChanAlloc: mem.Allocator
 runChan: chan.Chan(mem.Allocator)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
+tCount:u32
 
 
 _batchCleanup :: proc() {
-	free_all(commsAllocator)
+	// free_all(commsAllocator)
 	chan.close(comms)
 	chan.destroy(comms)
-	for c in contexts {
-		delete(c.rc.hits)
-		free(c.rc)
+	for i in 0..<tCount {
+		delete(contexts[i].rc.hits)
+		free(contexts[i].rc)
 	}
 	for &r in runners{
 		r={}
@@ -54,11 +55,11 @@ collisionTreeBatchedRayScan :: proc(
 ) {
 	offset: u32 = 0
 	maxEnd := u32(len(rays))
-	tCount := u32(batchCount)
+	tCount = u32(batchCount)
 	scanSize:= maxEnd / tCount
 	scanSize = tCount * scanSize < maxEnd ? scanSize + 1 : scanSize
 	err: runtime.Allocator_Error
-	comms, err = chan.create_buffered(chan.Chan(^ResponseContext), tCount, commsAllocator)
+	comms, err = chan.create_buffered(chan.Chan(^ResponseContext), tCount, context.allocator)
 	assert(err == .None)
 	for len(runners) < int(tCount) {
 		append(&runners, TaskRunner{})
@@ -90,8 +91,9 @@ collisionTreeBatchedRayScan :: proc(
 	return chan.as_recv(comms), int(tCount)
 }
 
+@(deferred_none=collisionTreeCleanup)
 collisionTreeInit :: proc(threadCount: int = 1) {
-	commsAllocator = _newArenaAllocator()
+	// commsAllocator = _newArenaAllocator()
 	completeGroup = new(sync.Wait_Group)
 	freeMutex = new(sync.Mutex)
 	runChanAlloc = _newArenaAllocator()
@@ -113,11 +115,11 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 	contexts = make([dynamic]ThreadContext)
 }
 
-collistionTreeCleanup :: proc() {
-	chan.close(&comms)
-	chan.destroy(comms)
-	free_all(commsAllocator)
-	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
+collisionTreeCleanup :: proc() {
+	// chan.close(&comms)
+	// chan.destroy(comms)
+	// free_all(commsAllocator)
+	// mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
 	free(completeGroup)
 	free(freeMutex)
 	for run in runners {

@@ -14,27 +14,27 @@ import "core:sync/chan"
 import "core:thread"
 import time "core:time"
 
-scanSize: u32
-
 dyn_pool: mem.Dynamic_Pool
 pool_allocator: mem.Allocator
 pool: thread.Pool
 runners: [dynamic]TaskRunner
 contexts: [dynamic]ThreadContext
 commsAllocator: mem.Allocator
-comms: chan.Chan(ThreadContext)
+comms: chan.Chan(^ResponseContext)
 g_logger: log.Logger
 runChanAlloc: mem.Allocator
 runChan: chan.Chan(mem.Allocator)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
 
+
 _batchCleanup :: proc() {
 	free_all(commsAllocator)
 	chan.close(comms)
 	chan.destroy(comms)
 	for c in contexts {
-		delete(c.hit)
+		delete(c.rc.hits)
+		free(c.rc)
 	}
 	for &r in runners{
 		r={}
@@ -49,30 +49,30 @@ collisionTreeBatchedRayScan :: proc(
 	batchCount: int,
 	loc := #caller_location,
 ) -> (
-	chan.Chan(ThreadContext, .Recv),
+	chan.Chan(^ResponseContext, .Recv),
 	int,
 ) {
 	offset: u32 = 0
 	maxEnd := u32(len(rays))
 	tCount := u32(batchCount)
-	scanSize = maxEnd / tCount
+	scanSize:= maxEnd / tCount
 	scanSize = tCount * scanSize < maxEnd ? scanSize + 1 : scanSize
 	err: runtime.Allocator_Error
-	comms, err = chan.create_buffered(chan.Chan(ThreadContext), tCount, commsAllocator)
+	comms, err = chan.create_buffered(chan.Chan(^ResponseContext), tCount, commsAllocator)
 	assert(err == .None)
-	if len(runners) < int(tCount) {
-		resize(&runners, tCount)
-		resize(&contexts, tCount)
+	for len(runners) < int(tCount) {
+		append(&runners, TaskRunner{})
+		append(&contexts, ThreadContext{})
 	}
 	// adding to the group before spawning the tasks to ensure that any quick tasks actually subtract from the wait group.
 	sync.wait_group_add(completeGroup, int(tCount))
 	for i in 0 ..< tCount {
 		run := &runners[i]
 		ok: bool
+		if run==nil do deref()
 		run.task = _threadScan
 		run.allocator, ok = chan.recv(runChan)
 		assert(ok)
-		contexts[i].offset = 0
 		end := math.min(offset + scanSize, maxEnd)
 		contexts[i].colTree = colTree
 		if offset > end {
@@ -80,10 +80,13 @@ collisionTreeBatchedRayScan :: proc(
 		}
 		contexts[i].rays = rays[offset:end]
 		contexts[i].offset = offset
-		offset += scanSize
-		contexts[i].hit = make([dynamic]Hit, 0, scanSize, loc = loc)
+		offset = end
+		contexts[i].rc = new(ResponseContext)
+		contexts[i].rc.hits = make([dynamic]Hit, 0, scanSize)//, loc = loc)
+		contexts[i].rc.searchTime = 0
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), int(i))
 	}
+	fmt.printfln("added %v tasks",tCount)
 	return chan.as_recv(comms), int(tCount)
 }
 
@@ -139,7 +142,7 @@ waitForBatch :: proc() {
 }
 
 //default wait is 1 ms
-isBatchComplete :: proc(timeOut: time.Duration = 1_000_000) -> bool {
+isBatchComplete :: proc(timeOut: time.Duration = 1_000) -> bool {
 	return sync.wait_group_wait_with_timeout(completeGroup, timeOut)
 }
 
@@ -160,8 +163,9 @@ _threadScan :: proc(task: thread.Task) {
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
 	context.allocator = task.allocator
+	if task.data==nil do deref()
 	tc := (cast(^ThreadContext)task.data)^
-	tc.searchTime = 0
+	tc.rc.searchTime = 0
 	sw := time.Stopwatch{}
 	time.stopwatch_start(&sw)
 	tb: u32 = 0
@@ -172,15 +176,18 @@ _threadScan :: proc(task: thread.Task) {
 		tt += t
 		if ray.t < MAX && sID >= 0 {
 			key := u32(i) + tc.offset
-			append(&tc.hit, Hit{key, sID, ray.t})
+			append(&tc.rc.hits, Hit{key, sID, ray.t})
 		}
 	}
 	time.stopwatch_stop(&sw)
-	tc.searchTime = time.stopwatch_duration(sw)
-	chan.send(comms, tc)
+	tc.rc.searchTime = time.stopwatch_duration(sw)
+	chan.send(comms, tc.rc)
+	fmt.printf("|Task %v sent comms|",task.user_index)
 	free_all(runners[task.user_index].allocator)
 	chan.send(runChan, runners[task.user_index].allocator)
+	fmt.printf("|Task %v sent alloc|",task.user_index)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
+	fmt.printfln("|Task %v completed",task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {

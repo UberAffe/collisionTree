@@ -53,7 +53,7 @@ texUpdate := false
 tree: ^ct.CollisionTree
 searchTime: time.Duration
 searchWatch: time.Stopwatch
-recvComms: chan.Chan(ThreadContext, .Recv)
+recvComms: chan.Chan(^ResponseContext, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 tex: rl.Texture2D
@@ -126,7 +126,10 @@ main :: proc() {
 	// defer rl.UnloadTexture(tex)
 	// defer rl.CloseWindow()
 
+	frame: u64= 0
 	for !rl.WindowShouldClose() {
+		fmt.printfln("frame %v start",frame)
+		frame+=1
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
 		rl.BeginDrawing()
@@ -142,16 +145,20 @@ main :: proc() {
 			time.stopwatch_start(&searchWatch)
 		}
 		FullDepthScan()
-		time.stopwatch_reset(&searchWatch)
-		time.stopwatch_start(&searchWatch)
+		fmt.println("wtf")
+		// time.stopwatch_reset(&searchWatch)
+		// time.stopwatch_start(&searchWatch)
 		if texUpdate {
 			texUpdate = false
+			fmt.print("tex - pre")
 			rl.UpdateTexture(tex, raw_data(pixels))
+			fmt.println(" - post")
 		}
 		rl.DrawTexture(tex, 0, 0, rl.WHITE)
 		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
 		rl.DrawFPS(10, 10)
 		if ready {
+			fmt.print("ready")
 			rl.DrawText(
 				fmt.ctprintf(
 					"build time: %v\ncumulative search time: %v\naverage search time per batch: %v\ntime to display: %v\ntriangles: %v\nTPR: %v",
@@ -167,6 +174,7 @@ main :: proc() {
 				16,
 				{150, 180, 150, 255},
 			)
+			fmt.println(" - post")
 		}
 
 		rl.EndDrawing()
@@ -225,20 +233,23 @@ _fullDepthScan :: proc() {
 	fmt.println("begining search")
 	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
 	fmt.printfln("receiving %v batch results",recvComms)
-	for i in 0 ..< count {
+	for !ct.isBatchComplete() {
 		//this call blocks until a message is recieved.
 		data, ok := chan.recv(recvComms)
-		fmt.printfln("received: %v",ok)
+		fmt.print(".")
 		assert(ok)
-		for hit in data.hit {
-			v: u8 = u8(255 - (data.rays[hit.rayID - data.offset].t - 4) * 180)
+		for hit in data.hits {
+			v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
 		searchTime += data.searchTime
+		fmt.print("-")
 	}
+	fmt.println()
 	time.stopwatch_stop(&searchWatch)
 	texUpdate = true
 	ready = true
+	fmt.println("end of DepthScan")
 }
 
 animate :: proc() {

@@ -14,6 +14,8 @@ import "core:sync/chan"
 import "core:thread"
 import time "core:time"
 
+AUTO_CLEAN::#config(ct_auto_clean,true)
+
 dyn_pool: mem.Dynamic_Pool
 pool_allocator: mem.Allocator
 pool: thread.Pool
@@ -23,7 +25,7 @@ commsAllocator: mem.Allocator
 comms: chan.Chan(^ResponseContext)
 g_logger: log.Logger
 runChanAlloc: mem.Allocator
-runChan: chan.Chan(mem.Allocator)
+runChan: chan.Chan(^mem.Dynamic_Arena)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
 tCount:u32
@@ -41,8 +43,7 @@ _batchCleanup :: proc() {
 		r={}
 	}
 }
-// This will automatically call the cleanup process as if it was a defer call from
-// the scope of the calling function
+
 @(deferred_none = _batchCleanup)
 collisionTreeBatchedRayScan :: proc(
 	colTree: ^CollisionTree,
@@ -69,10 +70,10 @@ collisionTreeBatchedRayScan :: proc(
 	sync.wait_group_add(completeGroup, int(tCount))
 	for i in 0 ..< tCount {
 		run := &runners[i]
-		ok: bool
 		if run==nil do deref()
 		run.task = _threadScan
-		run.allocator, ok = chan.recv(runChan)
+		ar, ok := chan.recv(runChan)
+
 		assert(ok)
 		end := math.min(offset + scanSize, maxEnd)
 		contexts[i].colTree = colTree
@@ -87,25 +88,24 @@ collisionTreeBatchedRayScan :: proc(
 		contexts[i].rc.searchTime = 0
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), int(i))
 	}
-	fmt.printfln("added %v tasks",tCount)
+	// fmt.printfln("added %v tasks",tCount)
 	return chan.as_recv(comms), int(tCount)
 }
 
-@(deferred_none=collisionTreeCleanup)
 collisionTreeInit :: proc(threadCount: int = 1) {
 	// commsAllocator = _newArenaAllocator()
 	completeGroup = new(sync.Wait_Group)
 	freeMutex = new(sync.Mutex)
-	runChanAlloc = _newArenaAllocator()
+	runChanAlloc := _ArenaAllocator(new(mem.Dynamic_Arena))
 	err: runtime.Allocator_Error
 	runChan, err = chan.create_buffered(
-		chan.Chan(mem.Allocator),
-		os.get_processor_core_count(),
-		runChanAlloc,
+		chan.Chan(^mem.Dynamic_Arena),
+		threadCount,
+		runChanAlloc
 	)
 	assert(err == .None)
 	for i in 0 ..< threadCount {
-		chan.send(chan.as_send(runChan), _newArenaAllocator())
+		chan.send(chan.as_send(runChan), new(mem.Dynamic_Arena))
 	}
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
@@ -116,10 +116,6 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 }
 
 collisionTreeCleanup :: proc() {
-	// chan.close(&comms)
-	// chan.destroy(comms)
-	// free_all(commsAllocator)
-	// mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)commsAllocator.data)
 	free(completeGroup)
 	free(freeMutex)
 	for run in runners {
@@ -143,13 +139,13 @@ waitForBatch :: proc() {
 	sync.wait(completeGroup)
 }
 
-//default wait is 1 ms
+//default wait is 1 micro second
 isBatchComplete :: proc(timeOut: time.Duration = 1_000) -> bool {
 	return sync.wait_group_wait_with_timeout(completeGroup, timeOut)
 }
 
-_newArenaAllocator :: proc(loc := #caller_location) -> mem.Allocator {
-	a := new(mem.Dynamic_Arena, loc = loc)
+_ArenaAllocator :: proc(a:^mem.Dynamic_Arena,loc := #caller_location) -> mem.Allocator {
+	// a := new(mem.Dynamic_Arena, loc = loc)
 	mem.dynamic_arena_init(a, alignment = 64)
 	return mem.dynamic_arena_allocator(a)
 }
@@ -183,13 +179,14 @@ _threadScan :: proc(task: thread.Task) {
 	}
 	time.stopwatch_stop(&sw)
 	tc.rc.searchTime = time.stopwatch_duration(sw)
+	// fmt.printf("|Task %v sent comms|",task.user_index)
 	chan.send(comms, tc.rc)
-	fmt.printf("|Task %v sent comms|",task.user_index)
+	
 	free_all(runners[task.user_index].allocator)
-	chan.send(runChan, runners[task.user_index].allocator)
-	fmt.printf("|Task %v sent alloc|",task.user_index)
+	chan.send(runChan, (^mem.Dynamic_Arena)(runners[task.user_index].allocator.data))
+	// fmt.printf("|Task %v sent alloc|",task.user_index)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
-	fmt.printfln("|Task %v completed",task.user_index)
+	// fmt.printfln("|Task %v completed",task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {

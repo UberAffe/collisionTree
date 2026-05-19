@@ -18,6 +18,8 @@ AABB :: struct {
 	lower: fl3 `json:"lower"`,
 }
 
+DEFAULTAABB:: AABB{{MIN, MIN, MIN}, {MAX, MAX, MAX}}
+
 BVHNode :: struct #align (32) {
 	using aabb: AABB `json:"aabb"`, //3d bounds
 	leftFirst:  u32 `json:"leftFirst"`,
@@ -80,6 +82,27 @@ CollisionTree :: struct #align (64) {
 	nodesUsed:   u32 `json:"nodesUsed"`,
 	splitChecks: u32 `json:"splitChecks"`,
 	longestOnly: bool `json:"longestOnly"`,
+}
+
+_GrowAABB :: proc {
+	_growAABBWithBox,
+	_growAABBWithNode,
+	_growAABBWithChildren
+}
+
+_growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
+	node.lower = _fminf(node.lower, leaf.lower)
+	node.upper = _fmaxf(node.upper, leaf.upper)
+}
+
+_growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
+	node.aabb.lower = _fminf(node.aabb.lower, leaf.lower)
+	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
+}
+
+_growAABBWithChildren::proc(node:^BVHNode, ct:^CollisionTree){
+	node.aabb.lower = _fminf(ct.bvhNode[node.leftFirst].aabb.lower, ct.bvhNode[node.leftFirst+1].aabb.lower)
+	node.aabb.upper = _fmaxf(ct.bvhNode[node.leftFirst].aabb.upper, ct.bvhNode[node.leftFirst+1].aabb.upper)
 }
 
 _swap :: proc(first, second: ^$T) {

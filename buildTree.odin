@@ -7,7 +7,7 @@ BuildBVH :: proc(
 	inputTri: []Shape,
 	divisionChecks: u32 = 16,
 	longestOnly: bool = false,
-) -> ^CollisionTree {
+) -> (^CollisionTree, f64){
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
 	colTree.nodesUsed = 1
@@ -26,30 +26,16 @@ BuildBVH :: proc(
 	colTree.splitChecks = divisionChecks
 	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
 	_Subdivide(colTree, colTree.rootNodeIdx)
-	return colTree
+	return colTree, calculateBuildCost(colTree)
 }
 
 _UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
-	colTree.bvhNode[nodeIdx].aabb = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
+	colTree.bvhNode[nodeIdx].aabb = DEFAULTAABB
 	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
 		_GrowAABB(&colTree.bvhNode[nodeIdx], s.aabb)
 	}
-}
-
-_GrowAABB :: proc {
-	_growAABBWithBox,
-	_growAABBWithNode,
-}
-
-_growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
-	node.aabb.lower = _fminf(node.aabb.lower, leaf.lower)
-	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
-}
-_growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
-	node.lower = _fminf(node.lower, leaf.lower)
-	node.upper = _fmaxf(node.upper, leaf.upper)
 }
 
 _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
@@ -89,6 +75,15 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 	_UpdateNodeBounds(colTree, rightChildIdx)
 	_Subdivide(colTree, leftChildIdx)
 	_Subdivide(colTree, rightChildIdx)
+}
+
+calculateBuildCost::proc(ct:^CollisionTree)->f64{
+	cost:f64=0
+	for n in ct.bvhNode{
+		if n.triCount==0 do continue
+		cost+= f64(_calculateNodeCost(n))
+	}
+	return cost
 }
 
 _calculateNodeCost :: proc(node: BVHNode) -> f32 {

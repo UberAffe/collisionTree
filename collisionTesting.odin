@@ -1,6 +1,7 @@
 package collisiontree
 
 import "base:runtime"
+import "core:simd"
 
 
 import "core:fmt"
@@ -58,11 +59,13 @@ customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 tex: rl.Texture2D
 textureUpdating: ^sync.Mutex
-batchCount := 1
-original: []ct.Shape
-inputTri: []ct.Shape
+batchCount := 8
+original: [dynamic]ct.Shape
+inputTri: [dynamic]ct.Shape
 bWatch: time.Stopwatch
 r: f32 = 0
+lastBuildCost: f64 = 0
+lastRefitCost: f64 = 0
 
 main :: proc() {
 	when PROFILING {
@@ -112,11 +115,14 @@ main :: proc() {
 	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 
 	original = buildTestTriangles2()
+	inputTri = make([dynamic]ct.Shape, len(original))
+	copy(inputTri[:], original[:])
+
 	defer delete(original)
-	inputTri = make([]ct.Shape, len(original))
 	defer delete(inputTri)
-	copy(inputTri, original)
 	bWatch = time.Stopwatch{}
+
+	tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
 
 	// rl.SetTargetFPS(30)
 	// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
@@ -126,14 +132,19 @@ main :: proc() {
 	// defer rl.UnloadTexture(tex)
 	// defer rl.CloseWindow()
 
-	frame: u64= 0
+	frame: u64 = 0
 	for !rl.WindowShouldClose() {
-		fmt.printfln("frame %v start",frame)
-		frame+=1
+		fmt.printfln("frame %v start", frame)
+		time.stopwatch_reset(&searchWatch)
+		time.stopwatch_start(&searchWatch)
+		frame += 1
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
+		for _, i in pixels {
+			pixels[i] = {30, 30, 30, 255}
+		}
 		if rl.IsMouseButtonPressed(.LEFT) || rl.IsKeyPressed(.SPACE) {
 			for _, i in pixels {
 				pixels[i] = {30, 30, 30, 255}
@@ -145,36 +156,35 @@ main :: proc() {
 			time.stopwatch_start(&searchWatch)
 		}
 		FullDepthScan()
-		fmt.println("wtf")
+		// fmt.println("wtf")
+		animate()
 		// time.stopwatch_reset(&searchWatch)
 		// time.stopwatch_start(&searchWatch)
 		if texUpdate {
 			texUpdate = false
-			fmt.print("tex - pre")
+			// fmt.print("tex - pre")
 			rl.UpdateTexture(tex, raw_data(pixels))
-			fmt.println(" - post")
+			// fmt.println(" - post")
 		}
+		time.stopwatch_stop(&searchWatch)
 		rl.DrawTexture(tex, 0, 0, rl.WHITE)
 		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
 		rl.DrawFPS(10, 10)
 		if ready {
-			fmt.print("ready")
+			// fmt.print("ready")
 			rl.DrawText(
 				fmt.ctprintf(
-					"build time: %v\ncumulative search time: %v\naverage search time per batch: %v\ntime to display: %v\ntriangles: %v\nTPR: %v",
-					time.stopwatch_duration(bWatch),
-					searchTime,
-					searchTime / time.Duration(batchCount),
-					time.stopwatch_duration(searchWatch),
-					len(inputTri),
-					searchTime / (640 * 640),
+					"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v",
+					lastBuildCost,
+					lastRefitCost,
+					time.stopwatch_duration(searchWatch)
 				),
 				10,
 				40,
 				16,
 				{150, 180, 150, 255},
 			)
-			fmt.println(" - post")
+			// fmt.println(" - post")
 		}
 
 		rl.EndDrawing()
@@ -204,13 +214,18 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 }
 
 _fullDepthScan :: proc() {
-	fmt.println("depthscan started")
+	// fmt.println("depthscan started")
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
-	tree = ct.BuildBVH(inputTri, 8, true)
-	defer delete(tree.bvhNode)
-	defer delete(tree.shapeIdx)
-	defer free(tree)
+	if math.abs(lastBuildCost-lastRefitCost) < lastBuildCost * .2 {
+		lastRefitCost = ct.RefitBVH(tree)
+	} else {
+		tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
+		lastRefitCost = lastBuildCost
+	}
+	// defer delete(tree.bvhNode)
+	// defer delete(tree.shapeIdx)
+	// defer free(tree)
 	time.stopwatch_stop(&bWatch)
 	camPos := fl3{0, 3.5, -4.5}
 	p0 := fl3{-1, 1, 2}
@@ -230,48 +245,50 @@ _fullDepthScan :: proc() {
 	}
 	count: int
 	searchTime = 0
-	fmt.println("begining search")
+	// fmt.println("begining search")
 	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
-	fmt.printfln("receiving %v batch results",recvComms)
+	// fmt.printfln("receiving %v batch results", recvComms)
 	for !ct.isBatchComplete() {
 		//this call blocks until a message is recieved.
 		// fmt.println(i)
-		data, ok := chan.recv(recvComms)
-		fmt.print(".")
-		assert(ok)
+		data, ok := chan.try_recv(recvComms)
+		if !ok do continue
+		// fmt.print(".")
 		for hit in data.hits {
 			v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
 		searchTime += data.searchTime
-		fmt.print("-")
+		// fmt.print("-")
 	}
-	fmt.println()
+	// fmt.println()
 	time.stopwatch_stop(&searchWatch)
 	texUpdate = true
 	ready = true
-	fmt.println("end of DepthScan")
+	// fmt.println("end of DepthScan")
 }
 
 animate :: proc() {
 	r += .05
 	if r > math.TAU do r -= math.TAU
-	a := math.sin(r) * .5
-	for i in 0 ..< N {
+	a := math.sin(r) * .1 //.5*.2
+	for i in 0 ..< len(original) {
 		for j in 0 ..< 3 {
 			o: ct.fl3
-			// switch type in original[i].type{
-			// 	case Tri:
-			// 		o=type.vertex[j]
-			// }
-			s := a * (o.y - .2) * .2
+			switch type in original[i].type {
+			case Tri:
+				o = type.vertex[j]
+			}
+			s := a * (o.y - .2)
 			x := o.x * math.cos(s) - o.y * math.sin(s)
 			y := o.x * math.sin(s) + o.y * math.cos(s)
-			// switch &type in inputTri[i].type{
-			// 	case Tri:
-			// 		type.vertex[j]=ct.fl3{x,y,o.z}
-			// }
+			#partial switch &type in inputTri[i].type {
+			case Tri:
+				type.vertex[j] = ct.fl3{x, y, o.z}
+				if j == 2 do inputTri[i].aabb = _getTriangleAABB(type)
+			}
 		}
+
 	}
 }
 
@@ -295,11 +312,11 @@ buildTestTriangles :: proc() -> []^Shape {
 	return input
 }
 
-buildTestTriangles2 :: proc() -> []Shape {
+buildTestTriangles2 :: proc() -> [dynamic]Shape {
 	err: os.Error
 	data := #load("assets/bigben.tri", []byte) or_else []byte{}
 	deletedata := false
-	fmt.println(len(data))
+	// fmt.println(len(data))
 	// if data==nil{
 	// 	data, err = os.read_entire_file("assets/bigben.tri", context.allocator)
 	// 	deletedata=true		
@@ -326,12 +343,12 @@ buildTestTriangles2 :: proc() -> []Shape {
 		append(&input, s)
 	}
 	if deletedata do delete(data)
-	return input[:]
+	return input
 }
 
 _getTriangleAABB :: proc(leaf: ct.Tri) -> AABB {
 	bounds: AABB = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
-	for v in leaf.vertex {
+	for v, i in leaf.vertex {
 		bounds.lower = _fminf(bounds.lower, v)
 		bounds.upper = _fmaxf(bounds.upper, v)
 	}

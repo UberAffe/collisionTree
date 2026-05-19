@@ -1,5 +1,6 @@
 package collisiontree
 
+import "core:fmt"
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
 _intersectBVH :: proc {
 	_intersectBVHRecursive,
@@ -55,6 +56,7 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 	idStack := [dynamic;64]^BVHNode{}
 	// defer delete(idStack)
 	sID := -1
+	k:=0
 	for {
 		if (node.triCount > 0) {
 			prevT: f32
@@ -87,6 +89,7 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 			node = child1
 			if dist2 != MAX do append(&idStack, child2)
 		}
+		k+=1
 	}
 	return bvhIterations, triIterations, sID
 }

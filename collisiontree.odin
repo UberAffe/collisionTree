@@ -29,6 +29,7 @@ runChan: chan.Chan(^mem.Dynamic_Arena)
 freeMutex: ^sync.Mutex
 completeGroup: ^sync.Wait_Group
 tCount:u32
+allArenas: [dynamic]^mem.Dynamic_Arena
 
 
 _batchCleanup :: proc() {
@@ -86,6 +87,7 @@ collisionTreeBatchedRayScan :: proc(
 		contexts[i].rc = new(ResponseContext)
 		contexts[i].rc.hits = make([dynamic]Hit, 0, scanSize)//, loc = loc)
 		contexts[i].rc.searchTime = 0
+		contexts[i].rc.batchID=i
 		thread.pool_add_task(&pool, run.allocator, run.task, rawptr(&contexts[i]), int(i))
 	}
 	// fmt.printfln("added %v tasks",tCount)
@@ -94,9 +96,11 @@ collisionTreeBatchedRayScan :: proc(
 
 collisionTreeInit :: proc(threadCount: int = 1) {
 	// commsAllocator = _newArenaAllocator()
+	g_logger=context.logger
 	completeGroup = new(sync.Wait_Group)
 	freeMutex = new(sync.Mutex)
-	runChanAlloc := _ArenaAllocator(new(mem.Dynamic_Arena))
+	append(&allArenas,new(mem.Dynamic_Arena))
+	runChanAlloc := _ArenaAllocator(allArenas[len(allArenas)-1])
 	err: runtime.Allocator_Error
 	runChan, err = chan.create_buffered(
 		chan.Chan(^mem.Dynamic_Arena),
@@ -105,7 +109,8 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 	)
 	assert(err == .None)
 	for i in 0 ..< threadCount {
-		chan.send(chan.as_send(runChan), new(mem.Dynamic_Arena))
+		append(&allArenas,new(mem.Dynamic_Arena))
+		chan.send(chan.as_send(runChan), allArenas[len(allArenas)-1])
 	}
 	mem.dynamic_pool_init(&dyn_pool)
 	pool_allocator = mem.dynamic_pool_allocator(&dyn_pool)
@@ -118,20 +123,15 @@ collisionTreeInit :: proc(threadCount: int = 1) {
 collisionTreeCleanup :: proc() {
 	free(completeGroup)
 	free(freeMutex)
-	for run in runners {
-		free_all(run.allocator)
-		mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)run.allocator.data)
-	}
 	delete(runners)
 	chan.close(&runChan)
 	chan.destroy(runChan)
-	free_all(runChanAlloc)
-	mem.dynamic_arena_destroy(cast(^mem.Dynamic_Arena)runChanAlloc.data)
 	delete(contexts)
 	thread.pool_shutdown(&pool)
 	thread.pool_destroy(&pool)
-	free_all(pool_allocator)
-	mem.dynamic_pool_destroy(cast(^mem.Dynamic_Pool)pool_allocator.data)
+	for ar in allArenas{
+		mem.dynamic_arena_destroy(ar)
+	}
 
 }
 
@@ -151,8 +151,10 @@ _ArenaAllocator :: proc(a:^mem.Dynamic_Arena,loc := #caller_location) -> mem.All
 }
 
 _threadScan :: proc(task: thread.Task) {
+	context.logger=g_logger
 	when PROFILING {
-		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		buffer_backing, err := make([]u8, 4096)
+		log.logf(log.Level(19),"task %v created buffer backing of size %v with error %v",task.user_index,len(buffer_backing),err)
 		defer delete(buffer_backing)
 
 		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
@@ -177,16 +179,14 @@ _threadScan :: proc(task: thread.Task) {
 			append(&tc.rc.hits, Hit{key, sID, ray.t})
 		}
 	}
+	log.debugf("for %v rays, we checked %v bounds and %v triangles, and hit %v times",len(tc.rays),tb,tt,len(tc.rc.hits))
 	time.stopwatch_stop(&sw)
 	tc.rc.searchTime = time.stopwatch_duration(sw)
-	// fmt.printf("|Task %v sent comms|",task.user_index)
 	chan.send(comms, tc.rc)
 	
 	free_all(runners[task.user_index].allocator)
 	chan.send(runChan, (^mem.Dynamic_Arena)(runners[task.user_index].allocator.data))
-	// fmt.printf("|Task %v sent alloc|",task.user_index)
 	sync.wait_group_done(completeGroup) //signal that this task is complete
-	// fmt.printfln("|Task %v completed",task.user_index)
 }
 
 saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {

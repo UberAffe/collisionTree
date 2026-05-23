@@ -1,9 +1,9 @@
 package collisiontree
 
 import "base:runtime"
-import "core:simd"
 
 
+import "../ThreadLogger"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -24,27 +24,28 @@ import ct "../collisionTree"
 N :: 640
 TEST :: 64
 PROFILING :: #config(profiling, false)
+LOGLEVEL :: #config(llevel,20)
 
 when PROFILING {
 	spall_ctx: spall.Context
 	@(thread_local)
 	spall_buffer: spall.Buffer
 
-	// @(instrumentation_enter)
-	// spall_enter :: proc "contextless" (
-	// 	proc_address, call_site_return_address: rawptr,
-	// 	loc: runtime.Source_Code_Location
-	// ) {
-	// 	spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
-	// }
+	@(instrumentation_enter)
+	spall_enter :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location
+	) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
 
-	// @(instrumentation_exit)
-	// spall_exit :: proc "contextless" (
-	// 	proc_address, call_site_return_address: rawptr,
-	// 	loc: runtime.Source_Code_Location,
-	// ) {
-	// 	spall._buffer_end(&spall_ctx, &spall_buffer)
-	// }
+	@(instrumentation_exit)
+	spall_exit :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_end(&spall_ctx, &spall_buffer)
+	}
 }
 
 pixels: [dynamic]rl.Color
@@ -54,20 +55,29 @@ texUpdate := false
 tree: ^ct.CollisionTree
 searchTime: time.Duration
 searchWatch: time.Stopwatch
+frameWatch: time.Stopwatch
 recvComms: chan.Chan(^ResponseContext, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 tex: rl.Texture2D
 textureUpdating: ^sync.Mutex
-batchCount := 8
+batchCount := 32
 original: [dynamic]ct.Shape
 inputTri: [dynamic]ct.Shape
 bWatch: time.Stopwatch
 r: f32 = 0
 lastBuildCost: f64 = 0
 lastRefitCost: f64 = 0
+threadLogger: log.Logger
 
 main :: proc() {
+	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
+	defer os.close(file)
+	fLogger := log.create_file_logger(file, log.Level(LOGLEVEL))
+	defer log.destroy_file_logger(fLogger)
+	threadLogger = ThreadLogger.CreateThreadedLogger(fLogger)
+	defer ThreadLogger.destroy()
+	context.logger = threadLogger
 	when PROFILING {
 		spall_ctx = spall.context_create("profiling/ct.spall")
 		defer spall.context_destroy(&spall_ctx)
@@ -85,9 +95,11 @@ main :: proc() {
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 		defer {
+			log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
 			if (len(track.allocation_map) > 0) {
-				for _, entry in track.allocation_map {
-					fmt.printfln("%v leaked %v bytes\n", entry.location, entry.size)
+				for err, entry in track.allocation_map {
+					log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
+					// if err!=nil do fmt.println(err)
 				}
 			}
 			mem.tracking_allocator_destroy(&track)
@@ -129,14 +141,13 @@ main :: proc() {
 
 	rl.InitWindow(640, 640, "test")
 	tex = rl.LoadTextureFromImage(im)
-	// defer rl.UnloadTexture(tex)
-	// defer rl.CloseWindow()
 
 	frame: u64 = 0
 	for !rl.WindowShouldClose() {
-		fmt.printfln("frame %v start", frame)
-		time.stopwatch_reset(&searchWatch)
-		time.stopwatch_start(&searchWatch)
+		// r=f32(rl.GetMouseX()/320)*math.TAU-math.TAU
+		log.infof("frame %v start", frame)
+		time.stopwatch_reset(&frameWatch)
+		time.stopwatch_start(&frameWatch)
 		frame += 1
 		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
 		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
@@ -145,53 +156,39 @@ main :: proc() {
 		for _, i in pixels {
 			pixels[i] = {30, 30, 30, 255}
 		}
-		if rl.IsMouseButtonPressed(.LEFT) || rl.IsKeyPressed(.SPACE) {
-			for _, i in pixels {
-				pixels[i] = {30, 30, 30, 255}
-			}
-			texUpdate = true
-			ready = false
-			// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
-			time.stopwatch_reset(&searchWatch)
-			time.stopwatch_start(&searchWatch)
-		}
+		time.stopwatch_reset(&searchWatch)
+		time.stopwatch_start(&searchWatch)
 		FullDepthScan()
-		// fmt.println("wtf")
+		time.stopwatch_stop(&searchWatch)
 		animate()
-		// time.stopwatch_reset(&searchWatch)
-		// time.stopwatch_start(&searchWatch)
 		if texUpdate {
 			texUpdate = false
-			// fmt.print("tex - pre")
 			rl.UpdateTexture(tex, raw_data(pixels))
-			// fmt.println(" - post")
 		}
-		time.stopwatch_stop(&searchWatch)
+
 		rl.DrawTexture(tex, 0, 0, rl.WHITE)
 		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
 		rl.DrawFPS(10, 10)
+		time.stopwatch_stop(&frameWatch)
 		if ready {
-			// fmt.print("ready")
 			rl.DrawText(
 				fmt.ctprintf(
 					"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v",
 					lastBuildCost,
 					lastRefitCost,
-					time.stopwatch_duration(searchWatch)
+					time.stopwatch_duration(frameWatch),
 				),
 				10,
 				40,
 				16,
 				{150, 180, 150, 255},
 			)
-			// fmt.println(" - post")
+			log.infof("Frame time %v",time.stopwatch_duration(frameWatch))
 		}
 
 		rl.EndDrawing()
 	}
-	fmt.println("exiting program")
-	// ct.saveBVH("model.bvh", tree)
-	// ct.collistionTreeCleanup()
+	log.info("exiting program")
 }
 
 FullDepthScan :: proc {
@@ -209,24 +206,38 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
+	context.logger = threadLogger
 	context.allocator = task.allocator
 	_fullDepthScan()
 }
 
 _fullDepthScan :: proc() {
-	// fmt.println("depthscan started")
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
-	if math.abs(lastBuildCost-lastRefitCost) < lastBuildCost * .2 {
+	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
 		lastRefitCost = ct.RefitBVH(tree)
+		time.stopwatch_stop(&bWatch)
+		log.logf(log.Level(19),
+			"refitting with a cost of %v and it took %v",
+			lastRefitCost,
+			time.stopwatch_duration(bWatch),
+		)
 	} else {
+		if tree==nil{
+			delete(tree.bvhNode)
+			delete(tree.shapeIdx)
+			free(tree)
+		}
 		tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
+		time.stopwatch_stop(&bWatch)
 		lastRefitCost = lastBuildCost
+		log.logf(log.Level(19),
+			"rebuilding with a cost of %v and it took %v",
+			lastBuildCost,
+			time.stopwatch_duration(bWatch),
+		)
 	}
-	// defer delete(tree.bvhNode)
-	// defer delete(tree.shapeIdx)
-	// defer free(tree)
-	time.stopwatch_stop(&bWatch)
+
 	camPos := fl3{0, 3.5, -4.5}
 	p0 := fl3{-1, 1, 2}
 	p1 := fl3{1, 1, 2}
@@ -245,27 +256,24 @@ _fullDepthScan :: proc() {
 	}
 	count: int
 	searchTime = 0
-	// fmt.println("begining search")
+	time.stopwatch_reset(&bWatch)
+	time.stopwatch_start(&bWatch)
 	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
-	// fmt.printfln("receiving %v batch results", recvComms)
-	for !ct.isBatchComplete() {
-		//this call blocks until a message is recieved.
-		// fmt.println(i)
-		data, ok := chan.try_recv(recvComms)
-		if !ok do continue
-		// fmt.print(".")
+
+	for count > 0 {
+		data := chan.recv(recvComms) or_break
+		log.logf(log.Level(15),"batch %v took %v to hit %v times", data.batchID, data.searchTime, len(data.hits))
 		for hit in data.hits {
 			v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
 			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 		}
 		searchTime += data.searchTime
-		// fmt.print("-")
+		count -= 1
 	}
-	// fmt.println()
-	time.stopwatch_stop(&searchWatch)
+	time.stopwatch_stop(&bWatch)
+	log.logf(log.Level(19),"summed search time of %v with observed search of %v",searchTime, time.stopwatch_duration(bWatch))
 	texUpdate = true
 	ready = true
-	// fmt.println("end of DepthScan")
 }
 
 animate :: proc() {
@@ -316,7 +324,6 @@ buildTestTriangles2 :: proc() -> [dynamic]Shape {
 	err: os.Error
 	data := #load("assets/bigben.tri", []byte) or_else []byte{}
 	deletedata := false
-	// fmt.println(len(data))
 	// if data==nil{
 	// 	data, err = os.read_entire_file("assets/bigben.tri", context.allocator)
 	// 	deletedata=true		

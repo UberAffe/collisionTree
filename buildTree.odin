@@ -1,5 +1,7 @@
 package collisiontree
 
+import "core:log"
+import "core:strings"
 import "core:math"
 import la "core:math/linalg"
 
@@ -31,7 +33,6 @@ BuildBVH :: proc(
 
 _UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 	colTree.bvhNode[nodeIdx].aabb = DEFAULTAABB
-	// fmt.println(colTree.bvhNode[nodeIdx].triCount)
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
 		_GrowAABB(&colTree.bvhNode[nodeIdx], s.aabb)
@@ -84,11 +85,6 @@ calculateBuildCost::proc(ct:^CollisionTree)->f64{
 		cost+= f64(_calculateNodeCost(n))
 	}
 	return cost
-}
-
-_calculateNodeCost :: proc(node: BVHNode) -> f32 {
-	extent := node.aabb.upper - node.aabb.lower
-	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
 }
 
 _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32, f32) {

@@ -1,14 +1,14 @@
 package collisiontree
 
-import "core:thread"
-import "core:mem"
-import "core:time"
-import "core:math"
 import "core:fmt"
+import "core:math"
+import "core:mem"
+import "core:thread"
+import "core:time"
 
 // MAX:: 1_000_000_000_000_000_000_000_000_000_000
-MAX:: math.F32_MAX
-MIN:: -MAX//math.F32_MAX
+MAX :: math.F32_MAX
+MIN :: -MAX //math.F32_MAX
 
 ui2 :: [2]u32
 fl3 :: [3]f32
@@ -18,7 +18,7 @@ AABB :: struct {
 	lower: fl3 `json:"lower"`,
 }
 
-DEFAULTAABB:: AABB{{MIN, MIN, MIN}, {MAX, MAX, MAX}}
+DEFAULTAABB :: AABB{{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 
 BVHNode :: struct #align (32) {
 	using aabb: AABB `json:"aabb"`, //3d bounds
@@ -58,15 +58,16 @@ Hit :: struct {
 }
 
 ThreadContext :: struct {
-	offset:     u32,
-	colTree:    ^CollisionTree,
-	rays:       []Ray,
-	rc:   ^ResponseContext,
+	offset:  u32,
+	colTree: ^CollisionTree,
+	rays:    []Ray,
+	rc:      ^ResponseContext,
 }
 
-ResponseContext :: struct{
+ResponseContext :: struct {
 	searchTime: time.Duration,
-	hits: 		[dynamic]Hit,
+	batchID:    u32,
+	hits:       [dynamic]Hit,
 }
 
 TaskRunner :: struct {
@@ -87,7 +88,7 @@ CollisionTree :: struct #align (64) {
 _GrowAABB :: proc {
 	_growAABBWithBox,
 	_growAABBWithNode,
-	_growAABBWithChildren
+	_growAABBWithChildren,
 }
 
 _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
@@ -100,17 +101,28 @@ _growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
 	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
 }
 
-_growAABBWithChildren::proc(node:^BVHNode, ct:^CollisionTree){
-	node.aabb.lower = _fminf(ct.bvhNode[node.leftFirst].aabb.lower, ct.bvhNode[node.leftFirst+1].aabb.lower)
-	node.aabb.upper = _fmaxf(ct.bvhNode[node.leftFirst].aabb.upper, ct.bvhNode[node.leftFirst+1].aabb.upper)
+_growAABBWithChildren :: proc(node: ^BVHNode, ct: ^CollisionTree) {
+	node.aabb.lower = _fminf(
+		ct.bvhNode[node.leftFirst].aabb.lower,
+		ct.bvhNode[node.leftFirst + 1].aabb.lower,
+	)
+	node.aabb.upper = _fmaxf(
+		ct.bvhNode[node.leftFirst].aabb.upper,
+		ct.bvhNode[node.leftFirst + 1].aabb.upper,
+	)
+}
+
+_calculateNodeCost :: proc(node: BVHNode) -> f32 {
+	extent := node.aabb.upper - node.aabb.lower
+	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
 }
 
 _swap :: proc(first, second: ^$T) {
-	if first==nil do deref()
-	if second==nil do deref()
+	if first == nil do deref()
+	if second == nil do deref()
 	t := first^
 	first^ = second^
 	second^ = t
 }
 
-deref::proc(loc:=#caller_location){fmt.println("deref at:",loc)}
+deref :: proc(loc := #caller_location) {fmt.println("deref at:", loc)}

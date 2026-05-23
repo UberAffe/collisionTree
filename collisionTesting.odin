@@ -135,6 +135,11 @@ main :: proc() {
 	bWatch = time.Stopwatch{}
 
 	tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
+	defer {
+		delete(tree.bvhNode)
+		delete(tree.shapeIdx)
+		free(tree)
+	}
 
 	// rl.SetTargetFPS(30)
 	// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
@@ -145,7 +150,7 @@ main :: proc() {
 	frame: u64 = 0
 	for !rl.WindowShouldClose() {
 		// r=f32(rl.GetMouseX()/320)*math.TAU-math.TAU
-		log.infof("frame %v start", frame)
+		log.logf(log.Level(17),"frame %v start", frame)
 		time.stopwatch_reset(&frameWatch)
 		time.stopwatch_start(&frameWatch)
 		frame += 1
@@ -217,13 +222,13 @@ _fullDepthScan :: proc() {
 	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
 		lastRefitCost = ct.RefitBVH(tree)
 		time.stopwatch_stop(&bWatch)
-		log.logf(log.Level(19),
+		log.logf(log.Level(17),
 			"refitting with a cost of %v and it took %v",
 			lastRefitCost,
 			time.stopwatch_duration(bWatch),
 		)
 	} else {
-		if tree==nil{
+		if tree!=nil{
 			delete(tree.bvhNode)
 			delete(tree.shapeIdx)
 			free(tree)
@@ -231,7 +236,7 @@ _fullDepthScan :: proc() {
 		tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
 		time.stopwatch_stop(&bWatch)
 		lastRefitCost = lastBuildCost
-		log.logf(log.Level(19),
+		log.logf(log.Level(17),
 			"rebuilding with a cost of %v and it took %v",
 			lastBuildCost,
 			time.stopwatch_duration(bWatch),
@@ -271,7 +276,7 @@ _fullDepthScan :: proc() {
 		count -= 1
 	}
 	time.stopwatch_stop(&bWatch)
-	log.logf(log.Level(19),"summed search time of %v with observed search of %v",searchTime, time.stopwatch_duration(bWatch))
+	log.logf(log.Level(17),"summed search time of %v with observed search of %v",searchTime, time.stopwatch_duration(bWatch))
 	texUpdate = true
 	ready = true
 }

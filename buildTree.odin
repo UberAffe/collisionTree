@@ -9,6 +9,7 @@ BuildBVH :: proc(
 	inputTri: []Shape,
 	divisionChecks: u32 = 16,
 	longestOnly: bool = false,
+	loc:=#caller_location
 ) -> (^CollisionTree, f64){
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
@@ -16,8 +17,8 @@ BuildBVH :: proc(
 	colTree.tri = inputTri
 	length := len(colTree.tri)
 	// memPadding:= new(i32)
-	colTree.bvhNode = make_slice([]BVHNode, 2 * length)
-	colTree.shapeIdx = make([]u32, length)
+	colTree.bvhNode = make([]BVHNode, 2 * length,loc=loc)
+	colTree.shapeIdx = make([]u32, length,loc=loc)
 	//([]BVHNode, 2 * length)
 	for &t, i in colTree.tri {
 		colTree.shapeIdx[i] = u32(i)

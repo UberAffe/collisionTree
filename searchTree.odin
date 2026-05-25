@@ -3,54 +3,7 @@ package collisiontree
 import "core:log"
 import "core:fmt"
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
-_intersectBVH :: proc {
-	_intersectBVHRecursive,
-	_intersectBVHLoop,
-}
-
-
-_intersectBVHRecursive :: proc(
-	colTree: ^CollisionTree,
-	ray: ^Ray,
-	nodeIdx: u32,
-) -> (
-	u32,
-	u32,
-	int,
-) {
-	bvhIterations: u32 = 1
-	triIterations: u32 = 0
-	if ray==nil do deref()
-	if !_intersectAABBBool(ray^, colTree.bvhNode[nodeIdx].aabb) do return bvhIterations, triIterations, 0
-	sID := -1
-	if colTree.bvhNode[nodeIdx].triCount > 0 {
-		prevT := ray.t
-		for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
-			testSID := int(colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i])
-			assert(testSID >= 0)
-			_intersectShape(colTree.tri[testSID], ray)
-			if ray.t < prevT {
-				prevT = ray.t
-				sID = testSID
-			}
-			triIterations += 1
-		}
-	} else {
-		b, t: u32
-		b, t, sID = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst)
-		prevT := ray.t
-		testSID: int
-		bvhIterations += b
-		triIterations += t
-		b, t, testSID = _intersectBVH(colTree, ray, colTree.bvhNode[nodeIdx].leftFirst + 1)
-		if ray.t < prevT do sID = testSID
-		bvhIterations += b
-		triIterations += t
-	}
-	return bvhIterations, triIterations, sID
-}
-
-_intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int) {
+_intersectBVH :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int) {
 	bvhIterations := u32(1)
 	triIterations := u32(0)
 	node := &colTree.bvhNode[colTree.rootNodeIdx]
@@ -62,7 +15,8 @@ _intersectBVHLoop :: proc(colTree: ^CollisionTree, ray: ^Ray) -> (u32, u32, int)
 			for i in 0 ..< node.triCount {
 				prevT = ray.t
 				curID := int(colTree.shapeIdx[node.leftFirst + i])
-				_intersectShape(colTree.tri[curID], ray)
+				_intersectTri(colTree.tri[curID].type.(Tri), ray)
+				// _intersectShape(colTree.tri[curID], ray)
 				if ray.t < prevT do sID = curID
 			}
 			triIterations += node.triCount

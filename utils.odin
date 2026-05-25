@@ -61,13 +61,15 @@ ThreadContext :: struct {
 	offset:  u32,
 	colTree: ^CollisionTree,
 	rays:    []Ray,
-	rc:      ^ResponseContext,
+	rc:      ^BatchResponse,
 }
 
-ResponseContext :: struct {
-	searchTime: time.Duration,
-	batchID:    u32,
-	hits:       [dynamic]Hit,
+BatchResponse :: struct {
+	searchTime:   time.Duration,
+	batchID:      u32,
+	boundsChecks: u32,
+	shapeChecks:  u32,
+	hits:         [dynamic]Hit,
 }
 
 TaskRunner :: struct {
@@ -76,7 +78,7 @@ TaskRunner :: struct {
 }
 
 CollisionTree :: struct #align (64) {
-	bvhNode:     []BVHNode `json:"bvhNode"`,
+	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
 	tri:         []Shape `json:"-"`,
 	shapeIdx:    []u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
@@ -123,6 +125,15 @@ _swap :: proc(first, second: ^$T) {
 	t := first^
 	first^ = second^
 	second^ = t
+}
+
+_getTriangleAABB :: proc(leaf: Tri) -> AABB {
+	bounds: AABB = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
+	for v, i in leaf.vertex {
+		bounds.lower = _fminf(bounds.lower, v)
+		bounds.upper = _fmaxf(bounds.upper, v)
+	}
+	return bounds
 }
 
 deref :: proc(loc := #caller_location) {fmt.println("deref at:", loc)}

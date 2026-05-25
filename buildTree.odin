@@ -1,38 +1,41 @@
 package collisiontree
 
+import "core:fmt"
 import "core:log"
-import "core:strings"
 import "core:math"
 import la "core:math/linalg"
+import "core:strings"
 
 BuildBVH :: proc(
 	inputTri: []Shape,
 	divisionChecks: u32 = 16,
 	longestOnly: bool = false,
-	loc:=#caller_location
-) -> (^CollisionTree, f64){
+	loc := #caller_location,
+) -> (
+	^CollisionTree,
+	f64,
+) {
 	colTree := new(CollisionTree)
 	colTree.rootNodeIdx = 0
 	colTree.nodesUsed = 1
 	colTree.tri = inputTri
 	length := len(colTree.tri)
-	// memPadding:= new(i32)
-	colTree.bvhNode = make([]BVHNode, 2 * length,loc=loc)
-	colTree.shapeIdx = make([]u32, length,loc=loc)
-	//([]BVHNode, 2 * length)
+	colTree.bvhNode = make([dynamic]BVHNode, 0, int(.6 * f32(length)), loc = loc)
+	colTree.shapeIdx = make([]u32, length, loc = loc)
 	for &t, i in colTree.tri {
 		colTree.shapeIdx[i] = u32(i)
 	}
-	// if len(colTree.bvhNode) <= int(colTree.rootNodeIdx) do append(&colTree.bvhNode, BVHNode{})
-	colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
+	append(&colTree.bvhNode,BVHNode{{},0,u32(length)})
+	// append(&colTree.bvhNode,BVHNode{})
+	// colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
 	colTree.longestOnly = longestOnly
-	colTree.splitChecks = divisionChecks
+	colTree.splitChecks = math.max(divisionChecks, 2)
 	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
 	_Subdivide(colTree, colTree.rootNodeIdx)
 	return colTree, calculateBuildCost(colTree)
 }
 
-_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
+_UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32, loc:=#caller_location) {
 	colTree.bvhNode[nodeIdx].aabb = DEFAULTAABB
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
@@ -41,7 +44,6 @@ _UpdateNodeBounds :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 }
 
 _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
-	// fmt.printfln("Division: %v, Count: %v", nodeIdx, colTree.bvhNode[nodeIdx].triCount)
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
 	parentCost := _calculateNodeCost(colTree.bvhNode[nodeIdx])
@@ -62,28 +64,30 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 	leftCount := u32(i) - colTree.bvhNode[nodeIdx].leftFirst
 	if leftCount == 0 || leftCount == colTree.bvhNode[nodeIdx].triCount do return
 	// create child nodes
-	leftChildIdx := colTree.nodesUsed
-	colTree.nodesUsed += 1
-	rightChildIdx := colTree.nodesUsed
-	colTree.nodesUsed += 1
-	// for len(colTree.bvhNode) <= int(rightChildIdx) do append(&colTree.bvhNode, BVHNode{})
-	colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
+	leftChildIdx := u32(len(colTree.bvhNode))
+	colTree.nodesUsed += 2
+	append(
+		&colTree.bvhNode,
+		BVHNode{{}, colTree.bvhNode[nodeIdx].leftFirst, leftCount},
+		BVHNode{{}, u32(i), colTree.bvhNode[nodeIdx].triCount - leftCount},
+	)
+	// colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
 	colTree.bvhNode[nodeIdx].leftFirst = leftChildIdx
-	colTree.bvhNode[leftChildIdx].triCount = leftCount
-	colTree.bvhNode[rightChildIdx].leftFirst = u32(i)
-	colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
+	// colTree.bvhNode[leftChildIdx].triCount = leftCount
+	// colTree.bvhNode[rightChildIdx].leftFirst = u32(i)
+	// colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
 	colTree.bvhNode[nodeIdx].triCount = 0
 	_UpdateNodeBounds(colTree, leftChildIdx)
-	_UpdateNodeBounds(colTree, rightChildIdx)
+	_UpdateNodeBounds(colTree, leftChildIdx+1)
 	_Subdivide(colTree, leftChildIdx)
-	_Subdivide(colTree, rightChildIdx)
+	_Subdivide(colTree, leftChildIdx+1)
 }
 
-calculateBuildCost::proc(ct:^CollisionTree)->f64{
-	cost:f64=0
-	for n in ct.bvhNode{
-		if n.triCount==0 do continue
-		cost+= f64(_calculateNodeCost(n))
+calculateBuildCost :: proc(ct: ^CollisionTree) -> f64 {
+	cost: f64 = 0
+	for n in ct.bvhNode {
+		if n.triCount == 0 do continue
+		cost += f64(_calculateNodeCost(n))
 	}
 	return cost
 }
@@ -102,7 +106,7 @@ _findBestSplitPlane :: proc(colTree: ^CollisionTree, nodeIdx: u32) -> (int, f32,
 			boundMin = math.min(boundMin, s.centroid[axis])
 			boundMax = math.max(boundMax, s.centroid[axis])
 		}
-		if boundMin == boundMax do continue
+		if boundMin >= boundMax do continue
 		scale := f32(colTree.splitChecks) / (boundMax - boundMin)
 		for i in 0 ..< node.triCount {
 			s := colTree.tri[colTree.shapeIdx[node.leftFirst + i]]

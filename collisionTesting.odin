@@ -23,8 +23,9 @@ import rl "vendor:raylib"
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
+BINS :: 2
 PROFILING :: #config(profiling, false)
-LOGLEVEL :: #config(llevel,20)
+LOGLEVEL :: #config(llevel, 20)
 
 when PROFILING {
 	spall_ctx: spall.Context
@@ -34,7 +35,7 @@ when PROFILING {
 	@(instrumentation_enter)
 	spall_enter :: proc "contextless" (
 		proc_address, call_site_return_address: rawptr,
-		loc: runtime.Source_Code_Location
+		loc: runtime.Source_Code_Location,
 	) {
 		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
 	}
@@ -56,7 +57,7 @@ tree: ^ct.CollisionTree
 searchTime: time.Duration
 searchWatch: time.Stopwatch
 frameWatch: time.Stopwatch
-recvComms: chan.Chan(^ResponseContext, .Recv)
+recvComms: chan.Chan(^BatchResponse, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 tex: rl.Texture2D
@@ -117,7 +118,7 @@ main :: proc() {
 	defer free(customPool)
 	thread.pool_init(customPool, customPoolAlloc, 1)
 	thread.pool_start(customPool)
-	collisionTreeInit(threadCount)
+	// collisionTreeInit(threadCount)
 
 	pixels = make([dynamic]rl.Color, N * N)
 	defer delete(pixels)
@@ -134,7 +135,7 @@ main :: proc() {
 	defer delete(inputTri)
 	bWatch = time.Stopwatch{}
 
-	tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
+	tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
 	defer {
 		delete(tree.bvhNode)
 		delete(tree.shapeIdx)
@@ -150,7 +151,7 @@ main :: proc() {
 	frame: u64 = 0
 	for !rl.WindowShouldClose() {
 		// r=f32(rl.GetMouseX()/320)*math.TAU-math.TAU
-		log.logf(log.Level(17),"frame %v start", frame)
+		log.logf(log.Level(17), "frame %v start", frame)
 		time.stopwatch_reset(&frameWatch)
 		time.stopwatch_start(&frameWatch)
 		frame += 1
@@ -165,7 +166,7 @@ main :: proc() {
 		time.stopwatch_start(&searchWatch)
 		FullDepthScan()
 		time.stopwatch_stop(&searchWatch)
-		animate()
+		// animate()
 		if texUpdate {
 			texUpdate = false
 			rl.UpdateTexture(tex, raw_data(pixels))
@@ -188,7 +189,7 @@ main :: proc() {
 				16,
 				{150, 180, 150, 255},
 			)
-			log.infof("Frame time %v",time.stopwatch_duration(frameWatch))
+			log.infof("Frame time %v", time.stopwatch_duration(frameWatch))
 		}
 
 		rl.EndDrawing()
@@ -222,21 +223,23 @@ _fullDepthScan :: proc() {
 	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
 		lastRefitCost = ct.RefitBVH(tree)
 		time.stopwatch_stop(&bWatch)
-		log.logf(log.Level(17),
+		log.logf(
+			log.Level(17),
 			"refitting with a cost of %v and it took %v",
 			lastRefitCost,
 			time.stopwatch_duration(bWatch),
 		)
 	} else {
-		if tree!=nil{
+		if tree != nil {
 			delete(tree.bvhNode)
 			delete(tree.shapeIdx)
 			free(tree)
 		}
-		tree, lastBuildCost = ct.BuildBVH(inputTri[:], 8, true)
+		tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
 		time.stopwatch_stop(&bWatch)
 		lastRefitCost = lastBuildCost
-		log.logf(log.Level(17),
+		log.logf(
+			log.Level(17),
 			"rebuilding with a cost of %v and it took %v",
 			lastBuildCost,
 			time.stopwatch_duration(bWatch),
@@ -247,7 +250,7 @@ _fullDepthScan :: proc() {
 	p0 := fl3{-1, 1, 2}
 	p1 := fl3{1, 1, 2}
 	p2 := fl3{-1, -1, 2}
-	rays := make([dynamic]Ray, 640 * 640, 640 * 640)
+	rays := make([dynamic]Ray, 640 * 640)
 	defer delete(rays)
 	for &ray, i in rays {
 		y := uint(i) / 640
@@ -263,22 +266,25 @@ _fullDepthScan :: proc() {
 	searchTime = 0
 	time.stopwatch_reset(&bWatch)
 	time.stopwatch_start(&bWatch)
-	recvComms, count = ct.collisionTreeBatchedRayScan(tree, rays[:], batchCount)
-
-	for count > 0 {
-		data := chan.recv(recvComms) or_break
-		log.logf(log.Level(15),"batch %v took %v to hit %v times", data.batchID, data.searchTime, len(data.hits))
-		for hit in data.hits {
-			v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
-			pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
-		}
-		searchTime += data.searchTime
-		count -= 1
-	}
+	response := ct.BatchResponse{}
+	ct.batchedScan(tree, &response, rays[:])
 	time.stopwatch_stop(&bWatch)
-	log.logf(log.Level(17),"summed search time of %v with observed search of %v",searchTime, time.stopwatch_duration(bWatch))
+	for hit in response.hits {
+		v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
+		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
+	}
+	log.logf(
+		log.Level(17),
+		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",
+		response.searchTime,
+		time.stopwatch_duration(bWatch),
+		response.boundsChecks,
+		response.shapeChecks,
+	)
 	texUpdate = true
 	ready = true
+	batchCount -= 1
+	if batchCount == 0 do batchCount = 32
 }
 
 animate :: proc() {
@@ -289,7 +295,7 @@ animate :: proc() {
 		for j in 0 ..< 3 {
 			o: ct.fl3
 			switch type in original[i].type {
-			case Tri:
+			case ct.Tri:
 				o = type.vertex[j]
 			}
 			s := a * (o.y - .2)
@@ -310,7 +316,7 @@ buildTestTriangles :: proc() -> []^Shape {
 	rand.reset(12345678910)
 	rf := rand.float32_uniform
 	for &t, i in input {
-		triangle := Tri{}
+		triangle := ct.Tri{}
 		r0 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r1 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r2 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
@@ -356,13 +362,4 @@ buildTestTriangles2 :: proc() -> [dynamic]Shape {
 	}
 	if deletedata do delete(data)
 	return input
-}
-
-_getTriangleAABB :: proc(leaf: ct.Tri) -> AABB {
-	bounds: AABB = {{MIN, MIN, MIN}, {MAX, MAX, MAX}}
-	for v, i in leaf.vertex {
-		bounds.lower = _fminf(bounds.lower, v)
-		bounds.upper = _fmaxf(bounds.upper, v)
-	}
-	return bounds
 }

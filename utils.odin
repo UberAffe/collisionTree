@@ -7,7 +7,7 @@ import "core:thread"
 import "core:time"
 
 // MAX:: 1_000_000_000_000_000_000_000_000_000_000
-MAX :: math.F32_MAX
+MAX :: math.INF_F32
 MIN :: -MAX //math.F32_MAX
 
 ui2 :: [2]u32

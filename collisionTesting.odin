@@ -3,7 +3,7 @@ package collisiontree
 import "base:runtime"
 
 
-import "../ThreadLogger"
+import TL "../ThreadLogger"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -69,16 +69,31 @@ bWatch: time.Stopwatch
 r: f32 = 0
 lastBuildCost: f64 = 0
 lastRefitCost: f64 = 0
-threadLogger: log.Logger
+tLogger: log.Logger
+height, width: uint = 640, 640
+xOff, yOff: uint = 0, 0
+click, release: [2]f32
+deepLog := false
+pixelPeek: [5]uint = {}
+peekColor: [5]rl.Color = {}
+p: [3]fl3 = {{-1, 1, 2}, {1, 1, 2}, {-1, -1, 2}}
+camPos := fl3{0, .5, -4.5} //fl3{0, 3.5, -4.5}
+// adjust: uint= 10
+// last: enum {
+// 	xOff,
+// 	yOff,
+// 	width,
+// 	height,
+// }
 
 main :: proc() {
 	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
 	defer os.close(file)
 	fLogger := log.create_file_logger(file, log.Level(LOGLEVEL))
 	defer log.destroy_file_logger(fLogger)
-	threadLogger = ThreadLogger.CreateThreadedLogger(fLogger)
-	defer ThreadLogger.destroy()
-	context.logger = threadLogger
+	tLogger = TL.CreateThreadedLogger(fLogger)
+	defer TL.destroy()
+	context.logger = tLogger
 	when PROFILING {
 		spall_ctx = spall.context_create("profiling/ct.spall")
 		defer spall.context_destroy(&spall_ctx)
@@ -142,35 +157,85 @@ main :: proc() {
 		free(tree)
 	}
 
-	// rl.SetTargetFPS(30)
-	// thread.pool_add_task(customPool, context.allocator, FullDepthScan, nil, 0)
-
 	rl.InitWindow(640, 640, "test")
 	tex = rl.LoadTextureFromImage(im)
 
 	frame: u64 = 0
 	for !rl.WindowShouldClose() {
-		// r=f32(rl.GetMouseX()/320)*math.TAU-math.TAU
+		if rl.IsMouseButtonPressed(.LEFT) {
+			click = rl.GetMousePosition()
+		} else if rl.IsMouseButtonReleased(.LEFT) {
+			release = rl.GetMousePosition()
+			xOff = uint(min(click.x, release.x))
+			yOff = uint(min(click.y, release.y))
+			width = uint(max(click.x, release.x)) - xOff
+			height = uint(max(click.y, release.y)) - yOff
+		}
+		if rl.IsKeyReleased(.L) do deepLog = !deepLog
+		if rl.IsMouseButtonReleased(.RIGHT) {
+			pos := rl.GetMousePosition()
+			center := uint(pos.x + pos.y * 640)
+			pixelPeek[0] = center
+			pixelPeek[1] = center + 1
+			pixelPeek[2] = center - 1
+			pixelPeek[3] = center + 640
+			pixelPeek[4] = center - 640
+			for i in 0 ..< len(peekColor) {
+				peekColor[i] = rl.Color{200, 100, 100, 255}
+			}
+			texUpdate = true
+		}
+		if rl.IsKeyReleased(.SPACE) {
+			if deepLog {
+				tLogger.lowest_level =log.Level(0)
+				
+			} else {
+				tLogger.lowest_level =log.Level(LOGLEVEL)
+			}
+			 context.logger = tLogger
+			fmt.println(deepLog)
+			fmt.println(context.logger.lowest_level)
+			for i in 0 ..< len(pixelPeek) {
+				_immediateIntersect(tree, pixelPeek[i] % 640, pixelPeek[i] / 640)
+				peekColor[i] = pixels[pixelPeek[i]]
+				peekColor[i].g += 30
+				peekColor[i].r -= 5
+				peekColor[i].b += 10
+			}
+			texUpdate = true
+			tLogger.lowest_level =log.Level(LOGLEVEL)
+			context.logger = tLogger
+		}
+
 		log.logf(log.Level(17), "frame %v start", frame)
 		time.stopwatch_reset(&frameWatch)
 		time.stopwatch_start(&frameWatch)
 		frame += 1
-		if rl.IsKeyDown(.UP) do batchCount = math.min(N, batchCount + 1)
-		if rl.IsKeyDown(.DOWN) do batchCount = math.max(1, batchCount - 1)
+
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
-		for _, i in pixels {
-			pixels[i] = {30, 30, 30, 255}
+		if rl.IsKeyPressed(.ENTER) || frame==1{
+			for _, i in pixels {
+				pixels[i] = {30, 30, 30, 255}
+			}
+			time.stopwatch_reset(&searchWatch)
+			time.stopwatch_start(&searchWatch)
+			FullDepthScan()
+			// _tick(0, tree)
+			time.stopwatch_stop(&searchWatch)
+			// animate()
 		}
-		time.stopwatch_reset(&searchWatch)
-		time.stopwatch_start(&searchWatch)
-		FullDepthScan()
-		time.stopwatch_stop(&searchWatch)
-		// animate()
+
 		if texUpdate {
-			texUpdate = false
+			if peekColor[0].a != 0 {
+				for i in 0 ..< len(pixelPeek) {
+					pixels[pixelPeek[i]] = peekColor[i]
+				}
+			}
 			rl.UpdateTexture(tex, raw_data(pixels))
+			texUpdate = false
 		}
+
 
 		rl.DrawTexture(tex, 0, 0, rl.WHITE)
 		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
@@ -179,10 +244,11 @@ main :: proc() {
 		if ready {
 			rl.DrawText(
 				fmt.ctprintf(
-					"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v",
+					"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v\ndeepLog? %v",
 					lastBuildCost,
 					lastRefitCost,
 					time.stopwatch_duration(frameWatch),
+					deepLog,
 				),
 				10,
 				40,
@@ -212,9 +278,44 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
-	context.logger = threadLogger
+	context.logger = tLogger
 	context.allocator = task.allocator
 	_fullDepthScan()
+}
+
+_tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
+	ray: ct.Ray
+	for v in 0 ..< height {
+		for u in 0 ..< width {
+			ray.O = fl3{0, .5, -4.5}
+			pixelPos :=
+				ray.O +
+				p.x +
+				(p.y - p.x) * (f32(xOff + u) / 640) +
+				(p.z - p.x) * (f32(yOff + v) / 640)
+			ray.D = la.normalize(pixelPos - ray.O)
+			ray.t = MAX
+			ray.rD = 1 / ray.D
+			ct._intersectBVH(bvh, &ray)
+			// ray.O = fl3{1, .5, -4.5}
+			// ct._intersectBVH(bvh, &ray)
+			c: u8 = u8(255 - (ray.t - 4) * 180)
+			pixels[(xOff + u) + (yOff + v) * 640] = rl.Color{c, c, c, 255}.rgba
+		}
+	}
+	// }
+}
+
+_immediateIntersect :: proc(bvh: ^ct.CollisionTree, x, y: uint) {
+	ray: ct.Ray
+	ray.O = camPos
+	pixelPos := ray.O + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y) / 640)
+	ray.D = la.normalize(pixelPos - ray.O)
+	ray.t = MAX
+	ray.rD = 1 / ray.D
+	b, t, id := ct._intersectBVH(bvh, &ray)
+	c: u8 = u8(255 - (ray.t - 4) * 180)
+	pixels[(x) + (y) * 640] = rl.Color{c, c, c, 255}.rgba
 }
 
 _fullDepthScan :: proc() {
@@ -246,18 +347,15 @@ _fullDepthScan :: proc() {
 		)
 	}
 
-	camPos := fl3{0, 3.5, -4.5}
-	p0 := fl3{-1, 1, 2}
-	p1 := fl3{1, 1, 2}
-	p2 := fl3{-1, -1, 2}
-	rays := make([dynamic]Ray, 640 * 640)
+	rays := make([dynamic]Ray, int(width * height))
 	defer delete(rays)
 	for &ray, i in rays {
-		y := uint(i) / 640
-		x := uint(i) % 640
+		y := uint(i) / uint(width) + uint(yOff)
+		x := uint(i) % uint(width) + uint(xOff)
 		ray.O = camPos
 		ray.D = la.normalize(
-			(camPos + p0 + (p1 - p0) * (f32(x) / 640) + (p2 - p0) * (f32(y + 0) / 640)) - ray.O,
+			(camPos + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y + 0) / 640)) -
+			ray.O,
 		)
 		ray.rD = 1 / ray.D
 		ray.t = MAX
@@ -269,10 +367,24 @@ _fullDepthScan :: proc() {
 	response := ct.BatchResponse{}
 	ct.batchedScan(tree, &response, rays[:])
 	time.stopwatch_stop(&bWatch)
+	maxT, minT:= MIN, MAX
+	maxRay, minRay: Ray
+	maxTID, minTID: int
 	for hit in response.hits {
-		v: u8 = u8(255 - (rays[hit.rayID].t - 4) * 180)
+		if hit.dist>maxT{
+			maxT=hit.dist
+			maxRay=rays[hit.rayID]
+			maxTID= hit.shapeID
+		}
+		if hit.dist< minT{
+			minT=hit.dist
+			minRay=rays[hit.rayID]
+			minTID= hit.shapeID
+		}
+		v:= u8(255 - (hit.dist-3.5946209) * 122.2661821)
 		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 	}
+	log.logf(log.Level(30),"max: %v, %v, %v | minT: %v, %v, %v",maxT, maxTID, maxRay, minT, minTID, minRay)
 	log.logf(
 		log.Level(17),
 		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",
@@ -332,13 +444,7 @@ buildTestTriangles :: proc() -> []^Shape {
 }
 
 buildTestTriangles2 :: proc() -> [dynamic]Shape {
-	err: os.Error
-	data := #load("assets/bigben.tri", []byte) or_else []byte{}
-	deletedata := false
-	// if data==nil{
-	// 	data, err = os.read_entire_file("assets/bigben.tri", context.allocator)
-	// 	deletedata=true		
-	// }
+	data, err := os.read_entire_file("assets/armadillo.tri", context.allocator)
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)
 	defer delete(pointList)
@@ -360,6 +466,6 @@ buildTestTriangles2 :: proc() -> [dynamic]Shape {
 		s.type = triangle
 		append(&input, s)
 	}
-	if deletedata do delete(data)
+	delete(data)
 	return input
 }

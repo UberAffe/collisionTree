@@ -3,7 +3,6 @@ package collisiontree
 import "core:fmt"
 import "core:log"
 import "core:math"
-import la "core:math/linalg"
 import "core:strings"
 
 BuildBVH :: proc(
@@ -71,11 +70,7 @@ _Subdivide :: proc(colTree: ^CollisionTree, nodeIdx: u32) {
 		BVHNode{{}, colTree.bvhNode[nodeIdx].leftFirst, leftCount},
 		BVHNode{{}, u32(i), colTree.bvhNode[nodeIdx].triCount - leftCount},
 	)
-	// colTree.bvhNode[leftChildIdx].leftFirst = colTree.bvhNode[nodeIdx].leftFirst
 	colTree.bvhNode[nodeIdx].leftFirst = leftChildIdx
-	// colTree.bvhNode[leftChildIdx].triCount = leftCount
-	// colTree.bvhNode[rightChildIdx].leftFirst = u32(i)
-	// colTree.bvhNode[rightChildIdx].triCount = colTree.bvhNode[nodeIdx].triCount - leftCount
 	colTree.bvhNode[nodeIdx].triCount = 0
 	_UpdateNodeBounds(colTree, leftChildIdx)
 	_UpdateNodeBounds(colTree, leftChildIdx+1)
@@ -177,21 +172,4 @@ _fminf :: proc(first, second: fl3) -> fl3 {
 }
 _fmaxf :: proc(first, second: fl3) -> fl3 {
 	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
-}
-
-_intersectTri :: proc(triangle: Tri, ray: ^Ray) {
-	edge1 := triangle.vertex[1] - triangle.vertex[0]
-	edge2 := triangle.vertex[2] - triangle.vertex[0]
-	h := la.cross(ray.D, edge2)
-	a := la.dot(edge1, h)
-	if a > -0.0001 && a < 0.0001 do return
-	f := 1 / a
-	s := ray.O - triangle.vertex[0]
-	u := f * la.dot(s, h)
-	if u < 0 || u > 1 do return
-	q := la.cross(s, edge1)
-	v := f * la.dot(ray.D, q)
-	if v < 0 || u + v > 1 do return
-	t := f * la.dot(edge2, q)
-	if t > 0.0001 do ray.t = min(ray.t, t)
 }

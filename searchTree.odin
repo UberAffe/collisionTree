@@ -104,6 +104,8 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX
 }
 
+//https://docs.google.com/spreadsheets/d/1pIyi3a3e-rDaneXjOIMA3eP6gcS93uybYXGKPdxv_oE/edit?usp=sharing
+//implemented in gsheet to inspect the values more directly
 _intersectTri :: proc(triangle: Tri, ray: ^Ray) {
 	edge1 := triangle.vertex[1] - triangle.vertex[0]
 	edge2 := triangle.vertex[2] - triangle.vertex[0]

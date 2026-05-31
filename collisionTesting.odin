@@ -23,7 +23,7 @@ import rl "vendor:raylib"
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
-BINS :: 2
+BINS :: 8
 PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 20)
 
@@ -187,12 +187,12 @@ main :: proc() {
 		}
 		if rl.IsKeyReleased(.SPACE) {
 			if deepLog {
-				tLogger.lowest_level =log.Level(0)
-				
+				tLogger.lowest_level = log.Level(0)
+
 			} else {
-				tLogger.lowest_level =log.Level(LOGLEVEL)
+				tLogger.lowest_level = log.Level(LOGLEVEL)
 			}
-			 context.logger = tLogger
+			context.logger = tLogger
 			fmt.println(deepLog)
 			fmt.println(context.logger.lowest_level)
 			for i in 0 ..< len(pixelPeek) {
@@ -203,7 +203,7 @@ main :: proc() {
 				peekColor[i].b += 10
 			}
 			texUpdate = true
-			tLogger.lowest_level =log.Level(LOGLEVEL)
+			tLogger.lowest_level = log.Level(LOGLEVEL)
 			context.logger = tLogger
 		}
 
@@ -214,14 +214,14 @@ main :: proc() {
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.WHITE)
-		if rl.IsKeyPressed(.ENTER) || frame==1{
+		if rl.IsKeyPressed(.ENTER) || frame == 1 {
 			for _, i in pixels {
 				pixels[i] = {30, 30, 30, 255}
 			}
 			time.stopwatch_reset(&searchWatch)
 			time.stopwatch_start(&searchWatch)
-			FullDepthScan()
-			// _tick(0, tree)
+			// FullDepthScan()
+			_tick(0, tree)
 			time.stopwatch_stop(&searchWatch)
 			// animate()
 		}
@@ -284,25 +284,29 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 }
 
 _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
-	ray: ct.Ray
-	for v in 0 ..< height {
-		for u in 0 ..< width {
-			ray.O = fl3{0, .5, -4.5}
-			pixelPos :=
-				ray.O +
-				p.x +
-				(p.y - p.x) * (f32(xOff + u) / 640) +
-				(p.z - p.x) * (f32(yOff + v) / 640)
-			ray.D = la.normalize(pixelPos - ray.O)
-			ray.t = MAX
-			ray.rD = 1 / ray.D
-			ct._intersectBVH(bvh, &ray)
-			// ray.O = fl3{1, .5, -4.5}
-			// ct._intersectBVH(bvh, &ray)
-			c: u8 = u8(255 - (ray.t - 4) * 180)
-			pixels[(xOff + u) + (yOff + v) * 640] = rl.Color{c, c, c, 255}.rgba
+	for tile in 0 ..< 6400 {
+		x, y:= tile%80, tile/80
+		ray: ct.Ray
+		for v in 0 ..< 8 {
+			for u in 0 ..< 8 {
+				pixelPos :=
+					ray.O +
+					p.x +
+					(p.y - p.x) * (f32(x*8 + u) / 640) +
+					(p.z - p.x) * (f32(y*8 + v) / 640)
+				ray.D = la.normalize(pixelPos - ray.O)
+				ray.rD = 1 / ray.D
+				ray.O = fl3{-1, .5, -4.5}
+				ray.t = MAX
+				bIt, tIt, shapeID := ct._intersectBVH(bvh, &ray)
+				ray.O = fl3{1, .5, -4.5}
+				bIt, tIt, shapeID = ct._intersectBVH(bvh, &ray)
+				c: u8 = u8(255 - (ray.t - 3) * 80)
+				pixels[(x*8 + u) + (y*8 + v) * 640] = rl.Color{c, c, c, 255}.rgba
+			}
 		}
 	}
+	texUpdate = true
 	// }
 }
 
@@ -367,24 +371,10 @@ _fullDepthScan :: proc() {
 	response := ct.BatchResponse{}
 	ct.batchedScan(tree, &response, rays[:])
 	time.stopwatch_stop(&bWatch)
-	maxT, minT:= MIN, MAX
-	maxRay, minRay: Ray
-	maxTID, minTID: int
 	for hit in response.hits {
-		if hit.dist>maxT{
-			maxT=hit.dist
-			maxRay=rays[hit.rayID]
-			maxTID= hit.shapeID
-		}
-		if hit.dist< minT{
-			minT=hit.dist
-			minRay=rays[hit.rayID]
-			minTID= hit.shapeID
-		}
-		v:= u8(255 - (hit.dist-3.5946209) * 122.2661821)
+		v := u8(255 - (hit.dist - 3.5946209) * 122.2661821)
 		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
 	}
-	log.logf(log.Level(30),"max: %v, %v, %v | minT: %v, %v, %v",maxT, maxTID, maxRay, minT, minTID, minRay)
 	log.logf(
 		log.Level(17),
 		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",

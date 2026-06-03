@@ -23,7 +23,7 @@ import rl "vendor:raylib"
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
-BINS :: 8
+BINS :: 16
 PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 20)
 
@@ -32,19 +32,27 @@ when PROFILING {
 	@(thread_local)
 	spall_buffer: spall.Buffer
 
-	@(instrumentation_enter)
-	spall_enter :: proc "contextless" (
-		proc_address, call_site_return_address: rawptr,
-		loc: runtime.Source_Code_Location,
-	) {
-		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	profileStart :: proc {
+		spall_enter,
+		spall_enter_named,
 	}
 
-	@(instrumentation_exit)
-	spall_exit :: proc "contextless" (
-		proc_address, call_site_return_address: rawptr,
-		loc: runtime.Source_Code_Location,
-	) {
+	@(deferred_none = spall_exit)
+	spall_enter :: proc(loc := #caller_location) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
+	@(deferred_none = spall_exit)
+	spall_enter_named :: proc(name: string) {
+		spall._buffer_begin(
+			&spall_ctx,
+			&spall_buffer,
+			"",
+			"",
+			runtime.Source_Code_Location{procedure = name},
+		)
+	}
+
+	spall_exit :: proc() {
 		spall._buffer_end(&spall_ctx, &spall_buffer)
 	}
 }
@@ -78,13 +86,8 @@ pixelPeek: [5]uint = {}
 peekColor: [5]rl.Color = {}
 p: [3]fl3 = {{-1, 1, 2}, {1, 1, 2}, {-1, -1, 2}}
 camPos := fl3{0, .5, -4.5} //fl3{0, 3.5, -4.5}
-// adjust: uint= 10
-// last: enum {
-// 	xOff,
-// 	yOff,
-// 	width,
-// 	height,
-// }
+bList: [dynamic]BLAS
+tList: [dynamic]CollisionTree
 
 main :: proc() {
 	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
@@ -150,10 +153,21 @@ main :: proc() {
 	defer delete(inputTri)
 	bWatch = time.Stopwatch{}
 
-	tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
+	blas: BLAS
+	blas, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, false)
+	bList = make([dynamic]BLAS)
+	append(&bList, blas)
+	tList = make([dynamic]CollisionTree)
+	append(&tList, CollisionTree{blasIndex = 0}, CollisionTree{blasIndex = 0})
+	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
+	m2 := la.matrix4_translate(fl3{1.3, 0, 0})
+	SetTransform(&tList[0], m1)
+	SetTransform(&tList[1], m2)
+
+	ct.balancedBVH(bList[0])
 	defer {
-		delete(tree.bvhNode)
-		delete(tree.shapeIdx)
+		// delete(tree.bvhNode)
+		// delete(tree.shapeIdx)
 		free(tree)
 	}
 
@@ -161,111 +175,113 @@ main :: proc() {
 	tex = rl.LoadTextureFromImage(im)
 
 	frame: u64 = 0
-	for !rl.WindowShouldClose() {
-		if rl.IsMouseButtonPressed(.LEFT) {
-			click = rl.GetMousePosition()
-		} else if rl.IsMouseButtonReleased(.LEFT) {
-			release = rl.GetMousePosition()
-			xOff = uint(min(click.x, release.x))
-			yOff = uint(min(click.y, release.y))
-			width = uint(max(click.x, release.x)) - xOff
-			height = uint(max(click.y, release.y)) - yOff
+	when !PROFILING {
+		for !rl.WindowShouldClose() {
+			Frame(frame)
+			frame += 1
 		}
-		if rl.IsKeyReleased(.L) do deepLog = !deepLog
-		if rl.IsMouseButtonReleased(.RIGHT) {
-			pos := rl.GetMousePosition()
-			center := uint(pos.x + pos.y * 640)
-			pixelPeek[0] = center
-			pixelPeek[1] = center + 1
-			pixelPeek[2] = center - 1
-			pixelPeek[3] = center + 640
-			pixelPeek[4] = center - 640
-			for i in 0 ..< len(peekColor) {
-				peekColor[i] = rl.Color{200, 100, 100, 255}
-			}
-			texUpdate = true
-		}
-		if rl.IsKeyReleased(.SPACE) {
-			if deepLog {
-				tLogger.lowest_level = log.Level(0)
-
-			} else {
-				tLogger.lowest_level = log.Level(LOGLEVEL)
-			}
-			context.logger = tLogger
-			fmt.println(deepLog)
-			fmt.println(context.logger.lowest_level)
-			for i in 0 ..< len(pixelPeek) {
-				_immediateIntersect(tree, pixelPeek[i] % 640, pixelPeek[i] / 640)
-				peekColor[i] = pixels[pixelPeek[i]]
-				peekColor[i].g += 30
-				peekColor[i].r -= 5
-				peekColor[i].b += 10
-			}
-			texUpdate = true
-			tLogger.lowest_level = log.Level(LOGLEVEL)
-			context.logger = tLogger
-		}
-
-		log.logf(log.Level(17), "frame %v start", frame)
-		time.stopwatch_reset(&frameWatch)
-		time.stopwatch_start(&frameWatch)
-		frame += 1
-
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.WHITE)
-		if rl.IsKeyPressed(.ENTER) || frame == 1 {
-			for _, i in pixels {
-				pixels[i] = {30, 30, 30, 255}
-			}
-			time.stopwatch_reset(&searchWatch)
-			time.stopwatch_start(&searchWatch)
-			// FullDepthScan()
-			_tick(0, tree)
-			time.stopwatch_stop(&searchWatch)
-			// animate()
-		}
-
-		if texUpdate {
-			if peekColor[0].a != 0 {
-				for i in 0 ..< len(pixelPeek) {
-					pixels[pixelPeek[i]] = peekColor[i]
-				}
-			}
-			rl.UpdateTexture(tex, raw_data(pixels))
-			texUpdate = false
-		}
-
-
-		rl.DrawTexture(tex, 0, 0, rl.WHITE)
-		rl.DrawRectangle(0, 0, 3, i32(batchCount), {180, 140, 140, 180})
-		rl.DrawFPS(10, 10)
-		time.stopwatch_stop(&frameWatch)
-		if ready {
-			rl.DrawText(
-				fmt.ctprintf(
-					"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v\ndeepLog? %v",
-					lastBuildCost,
-					lastRefitCost,
-					time.stopwatch_duration(frameWatch),
-					deepLog,
-				),
-				10,
-				40,
-				16,
-				{150, 180, 150, 255},
-			)
-			log.infof("Frame time %v", time.stopwatch_duration(frameWatch))
-		}
-
-		rl.EndDrawing()
 	}
-	log.info("exiting program")
+	when PROFILING {Frame(0)}
+
+}
+
+Frame :: proc(frame: u64) {
+	if rl.IsMouseButtonPressed(.LEFT) {
+		click = rl.GetMousePosition()
+	} else if rl.IsMouseButtonReleased(.LEFT) {
+		release = rl.GetMousePosition()
+		xOff = uint(min(click.x, release.x))
+		yOff = uint(min(click.y, release.y))
+		width = uint(max(click.x, release.x)) - xOff
+		height = uint(max(click.y, release.y)) - yOff
+	}
+	if rl.IsKeyReleased(.L) do deepLog = !deepLog
+	if rl.IsMouseButtonReleased(.RIGHT) {
+		pos := rl.GetMousePosition()
+		center := uint(pos.x + pos.y * 640)
+		pixelPeek[0] = center
+		pixelPeek[1] = center + 1
+		pixelPeek[2] = center - 1
+		pixelPeek[3] = center + 640
+		pixelPeek[4] = center - 640
+		for i in 0 ..< len(peekColor) {
+			peekColor[i] = rl.Color{200, 100, 100, 255}
+		}
+		texUpdate = true
+	}
+	if rl.IsKeyReleased(.SPACE) {
+		if deepLog {
+			tLogger.lowest_level = log.Level(0)
+
+		} else {
+			tLogger.lowest_level = log.Level(LOGLEVEL)
+		}
+		context.logger = tLogger
+		fmt.println(deepLog)
+		fmt.println(context.logger.lowest_level)
+		for i in 0 ..< len(pixelPeek) {
+			// _immediateIntersect(tree, pixelPeek[i] % 640, pixelPeek[i] / 640)
+			peekColor[i] = pixels[pixelPeek[i]]
+			peekColor[i].g += 30
+			peekColor[i].r -= 5
+			peekColor[i].b += 10
+		}
+		texUpdate = true
+		tLogger.lowest_level = log.Level(LOGLEVEL)
+		context.logger = tLogger
+	}
+
+	log.logf(log.Level(11), "frame %v start", frame)
+	time.stopwatch_reset(&frameWatch)
+	time.stopwatch_start(&frameWatch)
+
+	rl.BeginDrawing()
+	rl.ClearBackground(rl.WHITE)
+	// if rl.IsKeyPressed(.ENTER) || frame == 1 {
+	for _, i in pixels {
+		pixels[i] = {30, 30, 30, 255}
+	}
+	time.stopwatch_reset(&searchWatch)
+	time.stopwatch_start(&searchWatch)
+	// FullDepthScan()
+	_tick(f32(frame) / 10, tree)
+	time.stopwatch_stop(&searchWatch)
+	// animate()
+	if texUpdate {
+		if peekColor[0].a != 0 {
+			for i in 0 ..< len(pixelPeek) {
+				pixels[pixelPeek[i]] = peekColor[i]
+			}
+		}
+		rl.UpdateTexture(tex, raw_data(pixels))
+		texUpdate = false
+	}
+
+
+	rl.DrawTexture(tex, 0, 0, rl.WHITE)
+	rl.DrawFPS(10, 10)
+	time.stopwatch_stop(&frameWatch)
+	rl.DrawText(
+		fmt.ctprintf(
+			"lastBuildCost: %v\nlastRefitCost: %v\ntime to display: %v\ndeepLog? %v",
+			lastBuildCost,
+			lastRefitCost,
+			time.stopwatch_duration(frameWatch),
+			deepLog,
+		),
+		10,
+		40,
+		16,
+		{150, 180, 150, 255},
+	)
+	log.logf(log.Level(1), "Frame time %v", time.stopwatch_duration(frameWatch))
+
+	rl.EndDrawing()
 }
 
 FullDepthScan :: proc {
 	_threadedFullDepthScan,
-	_fullDepthScan,
+// _fullDepthScan,
 }
 
 _threadedFullDepthScan :: proc(task: thread.Task) {
@@ -280,114 +296,128 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 	}
 	context.logger = tLogger
 	context.allocator = task.allocator
-	_fullDepthScan()
+	// _fullDepthScan()
 }
 
 _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
+	when PROFILING {profileStart()}
+	angle := math.sin(dt)
+	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
+	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
+	SetTransform(&tList[0], m1)
+	SetTransform(&tList[1], m2)
+	tb, tt: u32
 	for tile in 0 ..< 6400 {
-		x, y:= tile%80, tile/80
+		x, y := tile % 80, tile / 80
 		ray: ct.Ray
+		ray.O = camPos
 		for v in 0 ..< 8 {
 			for u in 0 ..< 8 {
+				when PROFILING {profileStart("Pixel")}
 				pixelPos :=
 					ray.O +
 					p.x +
-					(p.y - p.x) * (f32(x*8 + u) / 640) +
-					(p.z - p.x) * (f32(y*8 + v) / 640)
+					(p.y - p.x) * (f32(x * 8 + u) / 640) +
+					(p.z - p.x) * (f32(y * 8 + v) / 640)
 				ray.D = la.normalize(pixelPos - ray.O)
 				ray.rD = 1 / ray.D
-				ray.O = fl3{-1, .5, -4.5}
 				ray.t = MAX
-				bIt, tIt, shapeID := ct._intersectBVH(bvh, &ray)
-				ray.O = fl3{1, .5, -4.5}
-				bIt, tIt, shapeID = ct._intersectBVH(bvh, &ray)
+
+				bIt, tIt, shapeID := ct._intersectBVH(tList[0], &ray)
+				tb += bIt
+				tt += tIt
+
+				bIt, tIt, shapeID = ct._intersectBVH(tList[1], &ray)
+				tb += bIt
+				tt += tIt
 				c: u8 = u8(255 - (ray.t - 3) * 80)
-				pixels[(x*8 + u) + (y*8 + v) * 640] = rl.Color{c, c, c, 255}.rgba
+				pixels[(x * 8 + u) + (y * 8 + v) * 640] = rl.Color{c, c, c, 255}.rgba
 			}
 		}
 	}
+	log.logf(log.Level(19), "Total AABB checks: %v, Total Tri checks: %v", tb, tt)
 	texUpdate = true
 	// }
 }
 
-_immediateIntersect :: proc(bvh: ^ct.CollisionTree, x, y: uint) {
-	ray: ct.Ray
-	ray.O = camPos
-	pixelPos := ray.O + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y) / 640)
-	ray.D = la.normalize(pixelPos - ray.O)
-	ray.t = MAX
-	ray.rD = 1 / ray.D
-	b, t, id := ct._intersectBVH(bvh, &ray)
-	c: u8 = u8(255 - (ray.t - 4) * 180)
-	pixels[(x) + (y) * 640] = rl.Color{c, c, c, 255}.rgba
-}
+// _immediateIntersect :: proc(bvh: ^ct.CollisionTree, x, y: uint) {
+// 	ray: ct.Ray
+// 	ray.O = camPos
+// 	pixelPos := ray.O + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y) / 640)
+// 	ray.D = la.normalize(pixelPos - ray.O)
+// 	ray.t = MAX
+// 	ray.rD = 1 / ray.D
+// 	b, t, id := ct._intersectBVH(bvh, &ray)
+// 	c: u8 = u8(255 - (ray.t - 4) * 180)
+// 	pixels[(x) + (y) * 640] = rl.Color{c, c, c, 255}.rgba
+// }
 
-_fullDepthScan :: proc() {
-	time.stopwatch_reset(&bWatch)
-	time.stopwatch_start(&bWatch)
-	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
-		lastRefitCost = ct.RefitBVH(tree)
-		time.stopwatch_stop(&bWatch)
-		log.logf(
-			log.Level(17),
-			"refitting with a cost of %v and it took %v",
-			lastRefitCost,
-			time.stopwatch_duration(bWatch),
-		)
-	} else {
-		if tree != nil {
-			delete(tree.bvhNode)
-			delete(tree.shapeIdx)
-			free(tree)
-		}
-		tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
-		time.stopwatch_stop(&bWatch)
-		lastRefitCost = lastBuildCost
-		log.logf(
-			log.Level(17),
-			"rebuilding with a cost of %v and it took %v",
-			lastBuildCost,
-			time.stopwatch_duration(bWatch),
-		)
-	}
+// _fullDepthScan :: proc() {
+// 	time.stopwatch_reset(&bWatch)
+// 	time.stopwatch_start(&bWatch)
+// 	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
+// 		lastRefitCost = ct.RefitBVH(tree)
+// 		time.stopwatch_stop(&bWatch)
+// 		log.logf(
+// 			log.Level(17),
+// 			"refitting with a cost of %v and it took %v",
+// 			lastRefitCost,
+// 			time.stopwatch_duration(bWatch),
+// 		)
+// 	} else {
+// 		if tree != nil {
+// 			delete(tree.bvhNode)
+// 			delete(tree.shapeIdx)
+// 			free(tree)
+// 		}
+// 		tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
+// 		time.stopwatch_stop(&bWatch)
+// 		lastRefitCost = lastBuildCost
+// 		log.logf(
+// 			log.Level(17),
+// 			"rebuilding with a cost of %v and it took %v",
+// 			lastBuildCost,
+// 			time.stopwatch_duration(bWatch),
+// 		)
+// 	}
 
-	rays := make([dynamic]Ray, int(width * height))
-	defer delete(rays)
-	for &ray, i in rays {
-		y := uint(i) / uint(width) + uint(yOff)
-		x := uint(i) % uint(width) + uint(xOff)
-		ray.O = camPos
-		ray.D = la.normalize(
-			(camPos + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y + 0) / 640)) -
-			ray.O,
-		)
-		ray.rD = 1 / ray.D
-		ray.t = MAX
-	}
-	count: int
-	searchTime = 0
-	time.stopwatch_reset(&bWatch)
-	time.stopwatch_start(&bWatch)
-	response := ct.BatchResponse{}
-	ct.batchedScan(tree, &response, rays[:])
-	time.stopwatch_stop(&bWatch)
-	for hit in response.hits {
-		v := u8(255 - (hit.dist - 3.5946209) * 122.2661821)
-		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
-	}
-	log.logf(
-		log.Level(17),
-		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",
-		response.searchTime,
-		time.stopwatch_duration(bWatch),
-		response.boundsChecks,
-		response.shapeChecks,
-	)
-	texUpdate = true
-	ready = true
-	batchCount -= 1
-	if batchCount == 0 do batchCount = 32
-}
+// 	rays := make([dynamic]Ray, int(width * height))
+// 	defer delete(rays)
+// 	for &ray, i in rays {
+// 		y := uint(i) / uint(width) + uint(yOff)
+// 		x := uint(i) % uint(width) + uint(xOff)
+// 		ray.O = camPos
+// 		ray.D = la.normalize(
+// 			(camPos + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y + 0) / 640)) -
+// 			ray.O,
+// 		)
+// 		ray.rD = 1 / ray.D
+// 		ray.t = MAX
+// 	}
+// 	count: int
+// 	searchTime = 0
+// 	time.stopwatch_reset(&bWatch)
+// 	time.stopwatch_start(&bWatch)
+// 	response := ct.BatchResponse{}
+// 	ct.batchedScan(tree, &response, rays[:])
+// 	time.stopwatch_stop(&bWatch)
+// 	for hit in response.hits {
+// 		v := u8(255 - (hit.dist - 3.5946209) * 122.2661821)
+// 		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
+// 	}
+// 	log.logf(
+// 		log.Level(17),
+// 		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",
+// 		response.searchTime,
+// 		time.stopwatch_duration(bWatch),
+// 		response.boundsChecks,
+// 		response.shapeChecks,
+// 	)
+// 	texUpdate = true
+// 	ready = true
+// 	batchCount -= 1
+// 	if batchCount == 0 do batchCount = 32
+// }
 
 animate :: proc() {
 	r += .05

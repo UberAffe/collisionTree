@@ -6,7 +6,7 @@ import "core:fmt"
 import "core:os"
 import time "core:time"
 
-batchedScan::proc(colTree:^CollisionTree,rc:^BatchResponse,rays:[]Ray,offset:u32=0){
+batchedScan::proc(colTree:CollisionTree,rc:^BatchResponse,rays:[]Ray,offset:u32=0){
 	rc.searchTime = 0
 	sw := time.Stopwatch{}
 	tb: u32 = 0
@@ -55,8 +55,8 @@ loadBVH :: proc(path: string, inputTri: []Shape) -> ^CollisionTree {
 	if err != nil do return nil
 	binary, _ := os.read_entire_file(file, context.allocator)
 	colTree := new(CollisionTree)
-	unerr := enc.unmarshal(binary, colTree)
-	if unerr != nil do return nil
-	colTree.tri = inputTri
+	// unerr := enc.unmarshal(binary, colTree)
+	// if unerr != nil do return nil
+	// colTree.tri = inputTri
 	return colTree
 }

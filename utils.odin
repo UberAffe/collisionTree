@@ -1,12 +1,13 @@
 package collisiontree
 
 import "core:fmt"
-import "core:math"
+import "core:log"
+import la "core:math/linalg"
 import "core:mem"
 import "core:thread"
 import "core:time"
 
-MAX:: 1_000_000_000_000_000_000_000_000_000_000
+MAX :: 1_000_000_000_000_000_000_000_000_000_000
 // MAX :: math.INF_F32
 MIN :: -MAX //math.F32_MAX
 
@@ -77,20 +78,26 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-CollisionTree :: struct #align (64) {
+BLAS :: struct {
 	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
 	tri:         []Shape `json:"-"`,
 	shapeIdx:    []u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
-	nodesUsed:   u32 `json:"nodesUsed"`,
 	splitChecks: u32 `json:"splitChecks"`,
 	longestOnly: bool `json:"longestOnly"`,
+}
+
+CollisionTree :: struct #align (64) {
+	blasIndex:    int,
+	invTransform: matrix[4, 4]f32,
+	bounds:       AABB, //world space
 }
 
 _GrowAABB :: proc {
 	_growAABBWithBox,
 	_growAABBWithNode,
 	_growAABBWithChildren,
+	_growAABBWithPoint,
 }
 
 _growAABBWithBox :: proc(node: ^AABB, leaf: AABB) {
@@ -103,7 +110,7 @@ _growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
 	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
 }
 
-_growAABBWithChildren :: proc(node: ^BVHNode, ct: ^CollisionTree) {
+_growAABBWithChildren :: proc(node: ^BVHNode, ct: ^BLAS) {
 	node.aabb.lower = _fminf(
 		ct.bvhNode[node.leftFirst].aabb.lower,
 		ct.bvhNode[node.leftFirst + 1].aabb.lower,
@@ -112,6 +119,11 @@ _growAABBWithChildren :: proc(node: ^BVHNode, ct: ^CollisionTree) {
 		ct.bvhNode[node.leftFirst].aabb.upper,
 		ct.bvhNode[node.leftFirst + 1].aabb.upper,
 	)
+}
+
+_growAABBWithPoint :: proc(bounds: ^AABB, point: fl3) {
+	bounds.lower = _fminf(bounds.lower, point)
+	bounds.upper = _fmaxf(bounds.upper, point)
 }
 
 _calculateNodeCost :: proc(node: BVHNode) -> f32 {
@@ -136,4 +148,68 @@ _getTriangleAABB :: proc(leaf: Tri) -> AABB {
 	return bounds
 }
 
+_transformPosition :: proc(pos: fl3, m: matrix[4, 4]f32) -> fl3 {return(
+		la.matrix_mul_vector(m, [4]f32{pos.x, pos.y, pos.z, 1}).xyz \
+	)}
+_transformVector :: proc(pos: fl3, m: matrix[4, 4]f32) -> fl3 {return(
+		la.matrix_mul_vector(m, [4]f32{pos.x, pos.y, pos.z, 0}).xyz \
+	)}
+
+
 deref :: proc(loc := #caller_location) {fmt.println("deref at:", loc)}
+
+balancedBVH :: proc(bvh: BLAS) {
+	balance :: struct {
+		lB, rB: int,
+		lL, rL: int,
+		lT, rT: u32,
+	}
+	dir :: enum {
+		left,
+		right,
+		first,
+	}
+	idStack := make([dynamic]u32)
+	dirStack := make([dynamic]dir)
+	depth := 0
+	left, right := 0, 0
+	append(&idStack, bvh.rootNodeIdx)
+	append(&dirStack, dir.first)
+	for {
+		b: balance
+		breadth := len(idStack)
+		// b.nodes = breadth
+		#reverse for id, i in idStack {
+			if i < breadth {
+				if bvh.bvhNode[id].triCount > 0 { 	//this is a leaf node
+					switch dirStack[i] {
+					case .left:
+						b.lL += 1
+						b.lT += bvh.bvhNode[id].triCount
+					case .right:
+						b.rL += 1
+						b.rT += bvh.bvhNode[id].triCount
+					case .first:
+					}
+					// b.nodes -= 1
+				} else { 	//this is a branch node and both children should be added to the stack
+					switch dirStack[i] {
+					case .left:
+						b.lB += 1
+					case .right:
+						b.rB += 1
+					case .first:
+					}
+					append(&idStack, bvh.bvhNode[id].leftFirst, bvh.bvhNode[id].leftFirst + 1)
+					append(&dirStack, dir.left, dir.right)
+				}
+				breadth -= 1
+				unordered_remove(&idStack, i)
+				unordered_remove(&dirStack, i)
+			}
+		}
+		log.logf(log.Level(30), "depth %v: %v", depth, b)
+		depth += 1
+		if len(idStack) == 0 do break
+	}
+}

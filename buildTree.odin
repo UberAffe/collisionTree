@@ -13,7 +13,7 @@ BuildBVH :: proc(
 	longestOnly: bool = false,
 	loc := #caller_location,
 ) -> (
-	BLAS,
+	BVH,
 	f64,
 ) {
 	// buildTimer:=time.Stopwatch{}
@@ -22,9 +22,8 @@ BuildBVH :: proc(
 	// 	log.logf(log.Level(17),"Build Time: %v",time.stopwatch_duration(buildTimer))
 	// }
 	when PROFILING {profileStart()}
-	colTree := BLAS{}
+	colTree := BVH{}
 	colTree.rootNodeIdx = 0
-	// colTree.nodesUsed = 1
 	colTree.tri = inputTri
 	length := len(colTree.tri)
 	colTree.bvhNode = make([dynamic]BVHNode, 0, int(.6 * f32(length)), loc = loc)
@@ -33,8 +32,6 @@ BuildBVH :: proc(
 		colTree.shapeIdx[i] = u32(i)
 	}
 	append(&colTree.bvhNode, BVHNode{{}, 0, u32(length)})
-	// append(&colTree.bvhNode,BVHNode{})
-	// colTree.bvhNode[colTree.rootNodeIdx].triCount = u32(length)
 	colTree.longestOnly = longestOnly
 	colTree.splitChecks = math.max(divisionChecks, 2)
 	_UpdateNodeBounds(&colTree, colTree.rootNodeIdx)
@@ -42,19 +39,18 @@ BuildBVH :: proc(
 	return colTree, calculateBuildCost(colTree)
 }
 
-SetTransform :: proc(colTree: ^CollisionTree, transform: matrix[4, 4]f32) {
+SetTransform :: proc(colTree: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
 	when PROFILING {profileStart()}
 	colTree.invTransform = la.matrix4_inverse(transform)
-	bmax, bmin := bList[colTree.blasIndex].bvhNode[0].upper, bList[colTree.blasIndex].bvhNode[0].lower
 	colTree.bounds = DEFAULTAABB
 	for i in 0 ..< 8 {
 		_GrowAABB(
 			&colTree.bounds,
 			_transformPosition(
 				fl3 {
-					i & 1 > 0 ? bmax.x : bmin.x,
-					i & 2 > 0 ? bmax.y : bmin.y,
-					i & 4 > 0 ? bmax.z : bmin.z,
+					i & 1 > 0 ? bvhBounds.upper.x : bvhBounds.lower.x,
+					i & 2 > 0 ? bvhBounds.upper.y : bvhBounds.lower.y,
+					i & 4 > 0 ? bvhBounds.upper.z : bvhBounds.lower.z,
 				},
 				transform,
 			),
@@ -62,7 +58,7 @@ SetTransform :: proc(colTree: ^CollisionTree, transform: matrix[4, 4]f32) {
 	}
 }
 
-_UpdateNodeBounds :: proc(colTree: ^BLAS, nodeIdx: u32, loc := #caller_location) {
+_UpdateNodeBounds :: proc(colTree: ^BVH, nodeIdx: u32, loc := #caller_location) {
 	colTree.bvhNode[nodeIdx].aabb = DEFAULTAABB
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
@@ -70,7 +66,7 @@ _UpdateNodeBounds :: proc(colTree: ^BLAS, nodeIdx: u32, loc := #caller_location)
 	}
 }
 
-_Subdivide :: proc(colTree: ^BLAS, nodeIdx: u32) {
+_Subdivide :: proc(colTree: ^BVH, nodeIdx: u32) {
 	when PROFILING {profileStart()}
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
@@ -104,7 +100,7 @@ _Subdivide :: proc(colTree: ^BLAS, nodeIdx: u32) {
 	}
 	//abort split if one side empty, but the triangles will still have been shuffled
 	leftCount := u32(i) - colTree.bvhNode[nodeIdx].leftFirst
-	if leftCount == 0 || leftCount == colTree.bvhNode[nodeIdx].triCount do return
+	if leftCount == 0 || leftCount >= colTree.bvhNode[nodeIdx].triCount do return
 	// create child nodes
 	leftChildIdx := u32(len(colTree.bvhNode))
 	// colTree.nodesUsed += 2
@@ -121,7 +117,7 @@ _Subdivide :: proc(colTree: ^BLAS, nodeIdx: u32) {
 	_Subdivide(colTree, leftChildIdx + 1)
 }
 
-calculateBuildCost :: proc(ct: BLAS) -> f64 {
+calculateBuildCost :: proc(ct: BVH) -> f64 {
 	cost: f64 = 0
 	for n in ct.bvhNode {
 		if n.triCount == 0 do continue
@@ -131,7 +127,7 @@ calculateBuildCost :: proc(ct: BLAS) -> f64 {
 }
 
 _findBestSplitPlane :: proc(
-	colTree: ^BLAS,
+	colTree: ^BVH,
 	nodeIdx: u32,
 	bound: AABB,
 ) -> (
@@ -204,7 +200,7 @@ _findBestSplitPlane :: proc(
 	return bestAxis, bestPos, bestCost
 }
 
-_evaluateSAH :: proc(colTree: ^BLAS, node: ^BVHNode, axis: int, pos: f32) -> f32 {
+_evaluateSAH :: proc(colTree: ^BVH, node: ^BVHNode, axis: int, pos: f32) -> f32 {
 	leftBox, rightBox: AABB
 	leftCount, rightCount: f32 = 0, 0
 	for i in 0 ..< node.triCount {
@@ -219,16 +215,4 @@ _evaluateSAH :: proc(colTree: ^BLAS, node: ^BVHNode, axis: int, pos: f32) -> f32
 	}
 	cost := leftCount * _areaAABB(leftBox) + rightCount * _areaAABB(rightBox)
 	return cost > 0 ? cost : MAX
-}
-
-_areaAABB :: proc(aabb: AABB) -> f32 {
-	e := aabb.upper - aabb.lower
-	return e.x * e.y + e.y * e.z + e.z * e.x
-}
-
-_fminf :: proc(first, second: fl3) -> fl3 {
-	return {min(first.x, second.x), min(first.y, second.y), min(first.z, second.z)}
-}
-_fmaxf :: proc(first, second: fl3) -> fl3 {
-	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
 }

@@ -23,8 +23,8 @@ import rl "vendor:raylib"
 import ct "../collisionTree"
 N :: 640
 TEST :: 64
-BINS :: 16
-PROFILING :: #config(profiling, false)
+BINS :: 8
+// PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 20)
 
 when PROFILING {
@@ -58,10 +58,9 @@ when PROFILING {
 }
 
 pixels: [dynamic]rl.Color
-rays: [dynamic]ct.Ray
+rays: [dynamic]Ray
 ready := false
 texUpdate := false
-tree: ^ct.CollisionTree
 searchTime: time.Duration
 searchWatch: time.Stopwatch
 frameWatch: time.Stopwatch
@@ -71,8 +70,8 @@ customPoolAlloc: mem.Allocator
 tex: rl.Texture2D
 textureUpdating: ^sync.Mutex
 batchCount := 32
-original: [dynamic]ct.Shape
-inputTri: [dynamic]ct.Shape
+original: [dynamic]Shape
+inputTri: [dynamic]Shape
 bWatch: time.Stopwatch
 r: f32 = 0
 lastBuildCost: f64 = 0
@@ -86,8 +85,7 @@ pixelPeek: [5]uint = {}
 peekColor: [5]rl.Color = {}
 p: [3]fl3 = {{-1, 1, 2}, {1, 1, 2}, {-1, -1, 2}}
 camPos := fl3{0, .5, -4.5} //fl3{0, 3.5, -4.5}
-bList: [dynamic]BLAS
-tList: [dynamic]CollisionTree
+tlas: TLAS
 
 main :: proc() {
 	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
@@ -146,29 +144,31 @@ main :: proc() {
 	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 
 	original = buildTestTriangles2()
-	inputTri = make([dynamic]ct.Shape, len(original))
+	inputTri = make([dynamic]Shape, len(original))
 	copy(inputTri[:], original[:])
 
 	defer delete(original)
 	defer delete(inputTri)
 	bWatch = time.Stopwatch{}
 
-	blas: BLAS
-	blas, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, false)
-	bList = make([dynamic]BLAS)
-	append(&bList, blas)
-	tList = make([dynamic]CollisionTree)
-	append(&tList, CollisionTree{blasIndex = 0}, CollisionTree{blasIndex = 0})
+	bvh: BVH
+	bvh, lastBuildCost = BuildBVH(inputTri[:], BINS, false)
+	tlas= Create_TLAS()
+	append(&tlas.bvhList, bvh)
+	append(&tlas.blas, BLAS{bvhIndex = 0}, BLAS{bvhIndex = 0})
+	Build_TLAS(&tlas)
+
 	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
 	m2 := la.matrix4_translate(fl3{1.3, 0, 0})
-	SetTransform(&tList[0], m1)
-	SetTransform(&tList[1], m2)
+	SetTransform(&tlas.blas[0],tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
+	SetTransform(&tlas.blas[1],tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
 
-	ct.balancedBVH(bList[0])
+	balancedBVH(tlas.bvhList[0])
 	defer {
+		Destroy_TLAS(tlas)
 		// delete(tree.bvhNode)
 		// delete(tree.shapeIdx)
-		free(tree)
+		// free(tree)
 	}
 
 	rl.InitWindow(640, 640, "test")
@@ -244,7 +244,7 @@ Frame :: proc(frame: u64) {
 	time.stopwatch_reset(&searchWatch)
 	time.stopwatch_start(&searchWatch)
 	// FullDepthScan()
-	_tick(f32(frame) / 10, tree)
+	_tick(f32(frame) / 10)
 	time.stopwatch_stop(&searchWatch)
 	// animate()
 	if texUpdate {
@@ -299,17 +299,17 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 	// _fullDepthScan()
 }
 
-_tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
+_tick :: proc(dt: f32) {
 	when PROFILING {profileStart()}
 	angle := math.sin(dt)
 	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
 	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
-	SetTransform(&tList[0], m1)
-	SetTransform(&tList[1], m2)
+	SetTransform(&tlas.blas[0],tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
+	SetTransform(&tlas.blas[1],tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
 	tb, tt: u32
 	for tile in 0 ..< 6400 {
 		x, y := tile % 80, tile / 80
-		ray: ct.Ray
+		ray: Ray
 		ray.O = camPos
 		for v in 0 ..< 8 {
 			for u in 0 ..< 8 {
@@ -323,11 +323,11 @@ _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
 				ray.rD = 1 / ray.D
 				ray.t = MAX
 
-				bIt, tIt, shapeID := ct._intersectBVH(tList[0], &ray)
+				bIt, tIt, shapeID := _intersectBVH(tlas,0, &ray)
 				tb += bIt
 				tt += tIt
 
-				bIt, tIt, shapeID = ct._intersectBVH(tList[1], &ray)
+				bIt, tIt, shapeID = _intersectBVH(tlas,1, &ray)
 				tb += bIt
 				tt += tIt
 				c: u8 = u8(255 - (ray.t - 3) * 80)
@@ -340,14 +340,14 @@ _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
 	// }
 }
 
-// _immediateIntersect :: proc(bvh: ^ct.CollisionTree, x, y: uint) {
-// 	ray: ct.Ray
+// _immediateIntersect :: proc(bvh: ^CollisionTree, x, y: uint) {
+// 	ray: Ray
 // 	ray.O = camPos
 // 	pixelPos := ray.O + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y) / 640)
 // 	ray.D = la.normalize(pixelPos - ray.O)
 // 	ray.t = MAX
 // 	ray.rD = 1 / ray.D
-// 	b, t, id := ct._intersectBVH(bvh, &ray)
+// 	b, t, id := _intersectBVH(bvh, &ray)
 // 	c: u8 = u8(255 - (ray.t - 4) * 180)
 // 	pixels[(x) + (y) * 640] = rl.Color{c, c, c, 255}.rgba
 // }
@@ -356,7 +356,7 @@ _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
 // 	time.stopwatch_reset(&bWatch)
 // 	time.stopwatch_start(&bWatch)
 // 	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
-// 		lastRefitCost = ct.RefitBVH(tree)
+// 		lastRefitCost = RefitBVH(tree)
 // 		time.stopwatch_stop(&bWatch)
 // 		log.logf(
 // 			log.Level(17),
@@ -370,7 +370,7 @@ _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
 // 			delete(tree.shapeIdx)
 // 			free(tree)
 // 		}
-// 		tree, lastBuildCost = ct.BuildBVH(inputTri[:], BINS, true)
+// 		tree, lastBuildCost = BuildBVH(inputTri[:], BINS, true)
 // 		time.stopwatch_stop(&bWatch)
 // 		lastRefitCost = lastBuildCost
 // 		log.logf(
@@ -398,8 +398,8 @@ _tick :: proc(dt: f32, bvh: ^ct.CollisionTree) {
 // 	searchTime = 0
 // 	time.stopwatch_reset(&bWatch)
 // 	time.stopwatch_start(&bWatch)
-// 	response := ct.BatchResponse{}
-// 	ct.batchedScan(tree, &response, rays[:])
+// 	response := BatchResponse{}
+// 	batchedScan(tree, &response, rays[:])
 // 	time.stopwatch_stop(&bWatch)
 // 	for hit in response.hits {
 // 		v := u8(255 - (hit.dist - 3.5946209) * 122.2661821)
@@ -425,9 +425,9 @@ animate :: proc() {
 	a := math.sin(r) * .1 //.5*.2
 	for i in 0 ..< len(original) {
 		for j in 0 ..< 3 {
-			o: ct.fl3
+			o: fl3
 			switch type in original[i].type {
-			case ct.Tri:
+			case Tri:
 				o = type.vertex[j]
 			}
 			s := a * (o.y - .2)
@@ -435,7 +435,7 @@ animate :: proc() {
 			y := o.x * math.sin(s) + o.y * math.cos(s)
 			#partial switch &type in inputTri[i].type {
 			case Tri:
-				type.vertex[j] = ct.fl3{x, y, o.z}
+				type.vertex[j] = fl3{x, y, o.z}
 				if j == 2 do inputTri[i].aabb = _getTriangleAABB(type)
 			}
 		}
@@ -448,7 +448,7 @@ buildTestTriangles :: proc() -> []^Shape {
 	rand.reset(12345678910)
 	rf := rand.float32_uniform
 	for &t, i in input {
-		triangle := ct.Tri{}
+		triangle := Tri{}
 		r0 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r1 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
 		r2 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
@@ -476,7 +476,7 @@ buildTestTriangles2 :: proc() -> [dynamic]Shape {
 		for v, j in vals {
 			pointList[j], _ = strconv.parse_f32(v)
 		}
-		triangle := ct.Tri{}
+		triangle := Tri{}
 		triangle.vertex[0] = {pointList[0], pointList[1], pointList[2]}
 		triangle.vertex[1] = {pointList[3], pointList[4], pointList[5]}
 		triangle.vertex[2] = {pointList[6], pointList[7], pointList[8]}

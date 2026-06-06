@@ -6,9 +6,10 @@ import la "core:math/linalg"
 import "core:fmt"
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
-_intersectBVH :: proc(colTree: CollisionTree, ray: ^Ray) -> (u32, u32, int) {
+_intersectBVH :: proc(tlas: TLAS,bidx:uint, ray: ^Ray) -> (u32, u32, int) {
 	when PROFILING {profileStart()}
-	blas:= bList[colTree.blasIndex]
+	colTree:=tlas.blas[bidx]
+	blas:= tlas.bvhList[colTree.bvhIndex]
 	log.logf(log.Level(10),"Intersecting %v in the tree",ray^)
 	log.logf(log.Level(10),"current node is %v",blas.rootNodeIdx)
 	bvhIterations := u32(0)
@@ -46,7 +47,6 @@ _intersectBVH :: proc(colTree: CollisionTree, ray: ^Ray) -> (u32, u32, int) {
 		when PROFILING {profileStart("Branch node")}
 		id:= node.leftFirst
 		id2:= id+1
-		if ray==nil do deref()
 		dist1 := _intersectAABBFloat(ray^, blas.bvhNode[id].aabb)
 		dist2 := _intersectAABBFloat(ray^, blas.bvhNode[id2].aabb)
 		bvhIterations += 2

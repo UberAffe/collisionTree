@@ -1,6 +1,6 @@
 package collisiontree
 
-RefitBVH::proc(ct:^BLAS) -> f64{
+RefitBVH::proc(ct:^BVH) -> f64{
     cost:f64=0
     for i:=int(len(ct.bvhNode)-1);i>=0;i-=1{
         if i == 1 do continue

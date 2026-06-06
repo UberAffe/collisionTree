@@ -6,29 +6,31 @@ import "core:fmt"
 import "core:os"
 import time "core:time"
 
-batchedScan::proc(colTree:CollisionTree,rc:^BatchResponse,rays:[]Ray,offset:u32=0){
-	rc.searchTime = 0
-	sw := time.Stopwatch{}
-	tb: u32 = 0
-	tt: u32 = 0
-	for &ray, i in rays {
-		time.stopwatch_start(&sw)
-		b, t, sID := _intersectBVH(colTree, &ray)
-		time.stopwatch_stop(&sw)
-		tb += b
-		tt += t
-		if ray.t < MAX && sID >= 0 {
-			key := u32(i) + offset
-			append(&rc.hits, Hit{key, sID, ray.t})
-		}
-	}
-	
-	rc.searchTime = time.stopwatch_duration(sw)
-	rc.boundsChecks=tb
-	rc.shapeChecks=tt
-}
+PROFILING :: #config(ctprofiling, false)
 
-saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
+// batchedScan::proc(colTree:BLAS,blas:BVH,rc:^BatchResponse,rays:[]Ray,offset:u32=0){
+// 	rc.searchTime = 0
+// 	sw := time.Stopwatch{}
+// 	tb: u32 = 0
+// 	tt: u32 = 0
+// 	for &ray, i in rays {
+// 		time.stopwatch_start(&sw)
+// 		b, t, sID := _intersectBVH(colTree,blas, &ray)
+// 		time.stopwatch_stop(&sw)
+// 		tb += b
+// 		tt += t
+// 		if ray.t < MAX && sID >= 0 {
+// 			key := u32(i) + offset
+// 			append(&rc.hits, Hit{key, sID, ray.t})
+// 		}
+// 	}
+	
+// 	rc.searchTime = time.stopwatch_duration(sw)
+// 	rc.boundsChecks=tb
+// 	rc.shapeChecks=tt
+// }
+
+saveBVH :: proc(path: string, colTree: ^BLAS) -> int {
 	file, err := os.open(path, {.Create, .Write, .Read})
 	if err != nil {
 		fmt.printfln("file error: %v", err)
@@ -49,12 +51,12 @@ saveBVH :: proc(path: string, colTree: ^CollisionTree) -> int {
 	return written
 }
 
-loadBVH :: proc(path: string, inputTri: []Shape) -> ^CollisionTree {
+loadBVH :: proc(path: string, inputTri: []Shape) -> ^BLAS {
 	file, err := os.open(path, {.Create, .Write, .Read})
 	defer os.close(file)
 	if err != nil do return nil
 	binary, _ := os.read_entire_file(file, context.allocator)
-	colTree := new(CollisionTree)
+	colTree := new(BLAS)
 	// unerr := enc.unmarshal(binary, colTree)
 	// if unerr != nil do return nil
 	// colTree.tri = inputTri

@@ -28,6 +28,12 @@ BVHNode :: struct #align (32) {
 	//total size 32 bytes
 }
 
+TLASNode :: struct {
+	using aabb: AABB,
+	leftBLAS:   uint,
+	isLeaf:     uint,
+}
+
 Shape :: struct {
 	aabb:     AABB,
 	centroid: fl3,
@@ -60,7 +66,7 @@ Hit :: struct {
 
 ThreadContext :: struct {
 	offset:  u32,
-	colTree: ^CollisionTree,
+	colTree: ^BLAS,
 	rays:    []Ray,
 	rc:      ^BatchResponse,
 }
@@ -78,7 +84,7 @@ TaskRunner :: struct {
 	task:      proc(_: thread.Task),
 }
 
-BLAS :: struct {
+BVH :: struct {
 	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
 	tri:         []Shape `json:"-"`,
 	shapeIdx:    []u32 `json:"shapeIdx"`,
@@ -87,10 +93,16 @@ BLAS :: struct {
 	longestOnly: bool `json:"longestOnly"`,
 }
 
-CollisionTree :: struct #align (64) {
-	blasIndex:    int,
+BLAS :: struct #align (64) {
+	bvhIndex:     uint,
 	invTransform: matrix[4, 4]f32,
 	bounds:       AABB, //world space
+}
+
+TLAS :: struct {
+	tlasNode: [dynamic]TLASNode,
+	bvhList:  [dynamic]BVH,
+	blas:     [dynamic]BLAS,
 }
 
 _GrowAABB :: proc {
@@ -110,7 +122,7 @@ _growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
 	node.aabb.upper = _fmaxf(node.aabb.upper, leaf.upper)
 }
 
-_growAABBWithChildren :: proc(node: ^BVHNode, ct: ^BLAS) {
+_growAABBWithChildren :: proc(node: ^BVHNode, ct: ^BVH) {
 	node.aabb.lower = _fminf(
 		ct.bvhNode[node.leftFirst].aabb.lower,
 		ct.bvhNode[node.leftFirst + 1].aabb.lower,
@@ -132,8 +144,6 @@ _calculateNodeCost :: proc(node: BVHNode) -> f32 {
 }
 
 _swap :: proc(first, second: ^$T) {
-	if first == nil do deref()
-	if second == nil do deref()
 	t := first^
 	first^ = second^
 	second^ = t
@@ -155,14 +165,24 @@ _transformVector :: proc(pos: fl3, m: matrix[4, 4]f32) -> fl3 {return(
 		la.matrix_mul_vector(m, [4]f32{pos.x, pos.y, pos.z, 0}).xyz \
 	)}
 
+_areaAABB :: proc(aabb: AABB) -> f32 {
+	e := aabb.upper - aabb.lower
+	return e.x * e.y + e.y * e.z + e.z * e.x
+}
 
-deref :: proc(loc := #caller_location) {fmt.println("deref at:", loc)}
+_fminf :: proc(first, second: fl3) -> fl3 {
+	return {min(first.x, second.x), min(first.y, second.y), min(first.z, second.z)}
+}
+_fmaxf :: proc(first, second: fl3) -> fl3 {
+	return {max(first.x, second.x), max(first.y, second.y), max(first.z, second.z)}
+}
 
-balancedBVH :: proc(bvh: BLAS) {
+balancedBVH :: proc(bvh: BVH) {
 	balance :: struct {
 		lB, rB: int,
 		lL, rL: int,
 		lT, rT: u32,
+		maxT:   u32,
 	}
 	dir :: enum {
 		left,
@@ -182,6 +202,7 @@ balancedBVH :: proc(bvh: BLAS) {
 		#reverse for id, i in idStack {
 			if i < breadth {
 				if bvh.bvhNode[id].triCount > 0 { 	//this is a leaf node
+					b.maxT = max(bvh.bvhNode[id].triCount, b.maxT)
 					switch dirStack[i] {
 					case .left:
 						b.lL += 1

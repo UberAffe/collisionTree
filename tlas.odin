@@ -81,17 +81,10 @@ Intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
 	tb, tt: u32 = 0, 0
 	closest := -1
 	for {
-		log.logf(
-			log.Level(40),
-			"thread %v: %v, blas %v",
-			sync.current_thread_id(),
-			node.leftRight,
-			node.blasIdx,
-		)
 		when PROFILING {profileStart("TLAS scan")}
 		if isLeaf(node.leftRight) {
 			when PROFILING {profileStart(fmt.tprint("TLAS leaf", node.blasIdx))}
-			bIt, tIt, shapeID := _intersectBVH(tlas, tlas.blas[node.blasIdx].bvhIndex, ray)
+			bIt, tIt, shapeID := _intersectBVH(tlas, node.blasIdx, ray)
 			closest = shapeID
 			tb += bIt
 			tt += tIt

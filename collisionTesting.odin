@@ -306,8 +306,8 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 _tick :: proc(dt: f32) {
 	when PROFILING {profileStart()}
 	angle := math.sin(dt)
-	m2 := la.matrix4_translate(fl3{-1.3, 0, 0})
-	m1 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
+	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
+	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
 	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
 	SetTransform(&tlas.blas[1], tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
 	Build_TLAS(&tlas)

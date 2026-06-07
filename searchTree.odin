@@ -6,18 +6,18 @@ import la "core:math/linalg"
 import "core:fmt"
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
-_intersectBVH :: proc(tlas: TLAS,bidx:uint, ray: ^Ray) -> (u32, u32, int) {
+_intersectBVH :: proc(tlas: TLAS,bidx:uint, originalRay: ^Ray) -> (u32, u32, int) {
 	when PROFILING {profileStart()}
 	colTree:=tlas.blas[bidx]
 	blas:= tlas.bvhList[colTree.bvhIndex]
-	log.logf(log.Level(10),"Intersecting %v in the tree",ray^)
+	log.logf(log.Level(10),"Intersecting %v in the tree",originalRay^)
 	log.logf(log.Level(10),"current node is %v",blas.rootNodeIdx)
 	bvhIterations := u32(0)
 	triIterations := u32(0)
 	node := blas.bvhNode[blas.rootNodeIdx]
 	idStack := [dynamic;64]u32{}
 	sID := -1
-	backupRay := ray^
+	ray := originalRay^
 	ray.O=_transformPosition(ray.O,colTree.invTransform)
 	ray.D=_transformVector(ray.D,colTree.invTransform)
 	ray.rD=1/ray.D
@@ -30,7 +30,7 @@ _intersectBVH :: proc(tlas: TLAS,bidx:uint, ray: ^Ray) -> (u32, u32, int) {
 				prevT = ray.t
 				curID := int(blas.shapeIdx[node.leftFirst + i])
 				log.logf(log.Level(10),"checking triangle %v",curID)
-				_intersectTri(blas.tri[curID].type.(Tri), ray)
+				_intersectTri(blas.tri[curID].type.(Tri), &ray)
 				// _intersectShape(colTree.tri[curID], ray)
 				if ray.t < prevT  {
 					log.logf(log.Level(10),"updating t")
@@ -47,8 +47,8 @@ _intersectBVH :: proc(tlas: TLAS,bidx:uint, ray: ^Ray) -> (u32, u32, int) {
 		when PROFILING {profileStart("Branch node")}
 		id:= node.leftFirst
 		id2:= id+1
-		dist1 := _intersectAABBFloat(ray^, blas.bvhNode[id].aabb)
-		dist2 := _intersectAABBFloat(ray^, blas.bvhNode[id2].aabb)
+		dist1 := _intersectAABBFloat(ray, blas.bvhNode[id].aabb)
+		dist2 := _intersectAABBFloat(ray, blas.bvhNode[id2].aabb)
 		bvhIterations += 2
 		if dist1 > dist2 {
 			_swap(&dist1, &dist2)
@@ -67,8 +67,7 @@ _intersectBVH :: proc(tlas: TLAS,bidx:uint, ray: ^Ray) -> (u32, u32, int) {
 			}
 		}
 	}
-	backupRay.t=ray.t
-	ray^=backupRay
+	originalRay.t=ray.t
 	return bvhIterations, triIterations, sID
 }
 

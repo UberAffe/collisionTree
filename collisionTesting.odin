@@ -24,6 +24,10 @@ import ct "../collisionTree"
 N :: 640
 TEST :: 64
 BINS :: 8
+TILEW::80
+TILEH::80
+SCALEW::N/TILEW
+SCALEH::N/TILEH
 // PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 20)
 
@@ -67,6 +71,7 @@ frameWatch: time.Stopwatch
 recvComms: chan.Chan(^BatchResponse, .Recv)
 customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
+taskGroup: sync.Wait_Group
 tex: rl.Texture2D
 textureUpdating: ^sync.Mutex
 batchCount := 32
@@ -132,7 +137,7 @@ main :: proc() {
 	defer free(textureUpdating)
 	customPool = new(thread.Pool)
 	defer free(customPool)
-	thread.pool_init(customPool, customPoolAlloc, 1)
+	thread.pool_init(customPool, customPoolAlloc, threadCount)
 	thread.pool_start(customPool)
 	// collisionTreeInit(threadCount)
 
@@ -153,15 +158,14 @@ main :: proc() {
 
 	bvh: BVH
 	bvh, lastBuildCost = BuildBVH(inputTri[:], BINS, false)
-	tlas= Create_TLAS()
+	tlas = Create_TLAS()
 	append(&tlas.bvhList, bvh)
 	append(&tlas.blas, BLAS{bvhIndex = 0}, BLAS{bvhIndex = 0})
-	Build_TLAS(&tlas)
-
 	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
 	m2 := la.matrix4_translate(fl3{1.3, 0, 0})
-	SetTransform(&tlas.blas[0],tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
-	SetTransform(&tlas.blas[1],tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
+	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
+	SetTransform(&tlas.blas[1], tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
+	Build_TLAS(&tlas)
 
 	balancedBVH(tlas.bvhList[0])
 	defer {
@@ -302,42 +306,65 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 _tick :: proc(dt: f32) {
 	when PROFILING {profileStart()}
 	angle := math.sin(dt)
-	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
-	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
-	SetTransform(&tlas.blas[0],tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
-	SetTransform(&tlas.blas[1],tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
+	m2 := la.matrix4_translate(fl3{-1.3, 0, 0})
+	m1 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
+	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
+	SetTransform(&tlas.blas[1], tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
+	Build_TLAS(&tlas)
+	// fmt.println(tlas.tlasNode[:])
+	// fmt.println(tlas.blas[:])
 	tb, tt: u32
-	for tile in 0 ..< 6400 {
-		x, y := tile % 80, tile / 80
-		ray: Ray
-		ray.O = camPos
-		for v in 0 ..< 8 {
-			for u in 0 ..< 8 {
-				when PROFILING {profileStart("Pixel")}
-				pixelPos :=
-					ray.O +
-					p.x +
-					(p.y - p.x) * (f32(x * 8 + u) / 640) +
-					(p.z - p.x) * (f32(y * 8 + v) / 640)
-				ray.D = la.normalize(pixelPos - ray.O)
-				ray.rD = 1 / ray.D
-				ray.t = MAX
-
-				bIt, tIt, shapeID := _intersectBVH(tlas,0, &ray)
-				tb += bIt
-				tt += tIt
-
-				bIt, tIt, shapeID = _intersectBVH(tlas,1, &ray)
-				tb += bIt
-				tt += tIt
-				c: u8 = u8(255 - (ray.t - 3) * 80)
-				pixels[(x * 8 + u) + (y * 8 + v) * 640] = rl.Color{c, c, c, 255}.rgba
-			}
-		}
+	sync.wait_group_add(&taskGroup,TILEW*TILEH)
+	for tile in 0 ..< TILEW*TILEH {
+		thread.pool_add_task(customPool,context.allocator,threadedTile,nil,tile)
+		// b,t:=tile_tick(tile)
+		// tb+=tb
+		// tt+=t
 	}
+	sync.wait_group_wait(&taskGroup)
 	log.logf(log.Level(19), "Total AABB checks: %v, Total Tri checks: %v", tb, tt)
 	texUpdate = true
-	// }
+}
+
+threadedTile::proc(task:thread.Task){
+	when PROFILING {
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+	}
+	context.logger=tLogger
+	tile_tick(task.user_index)
+	sync.wait_group_done(&taskGroup)
+}
+
+tile_tick :: proc(tile: int) -> (u32,u32) {
+	tb,tt:u32=0,0
+	x, y := tile % TILEW, tile / TILEW
+	ray: Ray
+	ray.O = camPos
+	for v in 0 ..< SCALEH {
+		for u in 0 ..< SCALEW {
+			when PROFILING {profileStart(fmt.tprint("Pixel ",x*SCALEW+u,",",y*SCALEH+v,sep=""))}
+			pixelPos :=
+				ray.O +
+				p.x +
+				(p.y - p.x) * (f32(x * SCALEW + u) / 640) +
+				(p.z - p.x) * (f32(y * SCALEH + v) / 640)
+			ray.D = la.normalize(pixelPos - ray.O)
+			ray.rD = 1 / ray.D
+			ray.t = MAX
+			bIt, tIt, shapeID := Intersect_TLAS(tlas, &ray)
+			tb += bIt
+			tt += tIt
+			c: u8 = u8(255 - (ray.t - 3) * 80)
+			pixels[(x * SCALEW + u) + (y * SCALEH + v) * 640] = rl.Color{c, c, c, 255}.rgba
+		}
+	}
+	return tb,tt
 }
 
 // _immediateIntersect :: proc(bvh: ^CollisionTree, x, y: uint) {

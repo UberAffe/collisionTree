@@ -28,10 +28,16 @@ BVHNode :: struct #align (32) {
 	//total size 32 bytes
 }
 
+LeftRight:: struct #align(8){
+	left: i32,
+	right: i32,
+}
+isLeaf::proc(lr:LeftRight)->bool{return transmute(uint)lr==0}
+
 TLASNode :: struct {
 	using aabb: AABB,
-	leftBLAS:   uint,
-	isLeaf:     uint,
+	using leftRight:   LeftRight,
+	blasIdx:     uint,
 }
 
 Shape :: struct {
@@ -141,6 +147,11 @@ _growAABBWithPoint :: proc(bounds: ^AABB, point: fl3) {
 _calculateNodeCost :: proc(node: BVHNode) -> f32 {
 	extent := node.aabb.upper - node.aabb.lower
 	return f32(node.triCount) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
+}
+
+_calculateSurfaceArea :: proc(aabb: AABB) -> f32 {
+	extent := aabb.upper - aabb.lower
+	return extent.x * extent.y + extent.y * extent.z + extent.z * extent.x
 }
 
 _swap :: proc(first, second: ^$T) {

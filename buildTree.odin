@@ -39,13 +39,14 @@ BuildBVH :: proc(
 	return colTree, calculateBuildCost(colTree)
 }
 
-SetTransform :: proc(colTree: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
+//This updates the BLAS bounds to equal the world space equivalent of the bvh
+SetTransform :: proc(blas: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
 	when PROFILING {profileStart()}
-	colTree.invTransform = la.matrix4_inverse(transform)
-	colTree.bounds = DEFAULTAABB
+	blas.invTransform = la.matrix4_inverse(transform)
+	blas.bounds = DEFAULTAABB
 	for i in 0 ..< 8 {
 		_GrowAABB(
-			&colTree.bounds,
+			&blas.bounds,
 			_transformPosition(
 				fl3 {
 					i & 1 > 0 ? bvhBounds.upper.x : bvhBounds.lower.x,

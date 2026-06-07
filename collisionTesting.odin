@@ -24,10 +24,10 @@ import ct "../collisionTree"
 N :: 640
 TEST :: 64
 BINS :: 8
-TILEW::80
-TILEH::80
-SCALEW::N/TILEW
-SCALEH::N/TILEH
+TILEW :: 80
+TILEH :: 80
+SCALEW :: N / TILEW
+SCALEH :: N / TILEH
 // PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 20)
 
@@ -303,9 +303,27 @@ _threadedFullDepthScan :: proc(task: thread.Task) {
 	// _fullDepthScan()
 }
 
+rollCamera :: proc(rollBy: f32) {
+	for &corner in p {
+		corner = _transformPosition(corner, la.matrix4_rotate(rollBy, fl3{0, 0, 1}))
+	}
+}
+
+swingCamera :: proc(angle: f32) {
+	dist := la.distance(fl3{}, camPos)
+	r := la.matrix4_rotate(angle,fl3{0,1,0})
+	camPos = _transformPosition(camPos, r)
+	for &corner in p {
+		dist = la.distance(fl3{}, corner)
+		corner = _transformPosition(corner, r)
+	}
+}
+
 _tick :: proc(dt: f32) {
 	when PROFILING {profileStart()}
 	angle := math.sin(dt)
+	// rollCamera(angle/4)
+	swingCamera(dt/40)
 	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
 	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
 	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
@@ -314,9 +332,9 @@ _tick :: proc(dt: f32) {
 	// fmt.println(tlas.tlasNode[:])
 	// fmt.println(tlas.blas[:])
 	tb, tt: u32
-	sync.wait_group_add(&taskGroup,TILEW*TILEH)
-	for tile in 0 ..< TILEW*TILEH {
-		thread.pool_add_task(customPool,context.allocator,threadedTile,nil,tile)
+	sync.wait_group_add(&taskGroup, TILEW * TILEH)
+	for tile in 0 ..< TILEW * TILEH {
+		thread.pool_add_task(customPool, context.allocator, threadedTile, nil, tile)
 		// b,t:=tile_tick(tile)
 		// tb+=tb
 		// tt+=t
@@ -326,7 +344,7 @@ _tick :: proc(dt: f32) {
 	texUpdate = true
 }
 
-threadedTile::proc(task:thread.Task){
+threadedTile :: proc(task: thread.Task) {
 	when PROFILING {
 		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
 		defer delete(buffer_backing)
@@ -336,19 +354,21 @@ threadedTile::proc(task:thread.Task){
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
-	context.logger=tLogger
+	context.logger = tLogger
 	tile_tick(task.user_index)
 	sync.wait_group_done(&taskGroup)
 }
 
-tile_tick :: proc(tile: int) -> (u32,u32) {
-	tb,tt:u32=0,0
+tile_tick :: proc(tile: int) -> (u32, u32) {
+	tb, tt: u32 = 0, 0
 	x, y := tile % TILEW, tile / TILEW
 	ray: Ray
 	ray.O = camPos
 	for v in 0 ..< SCALEH {
 		for u in 0 ..< SCALEW {
-			when PROFILING {profileStart(fmt.tprint("Pixel ",x*SCALEW+u,",",y*SCALEH+v,sep=""))}
+			when PROFILING {profileStart(
+					fmt.tprint("Pixel ", x * SCALEW + u, ",", y * SCALEH + v, sep = ""),
+				)}
 			pixelPos :=
 				ray.O +
 				p.x +
@@ -364,7 +384,7 @@ tile_tick :: proc(tile: int) -> (u32,u32) {
 			pixels[(x * SCALEW + u) + (y * SCALEH + v) * 640] = rl.Color{c, c, c, 255}.rgba
 		}
 	}
-	return tb,tt
+	return tb, tt
 }
 
 // _immediateIntersect :: proc(bvh: ^CollisionTree, x, y: uint) {

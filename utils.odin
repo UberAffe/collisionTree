@@ -8,8 +8,6 @@ import "core:thread"
 import "core:time"
 import "core:math"
 
-// MAX :: 1_000_000_000_000_000_000_000_000_000_000
-
 MAX :: math.INF_F32
 MIN :: -MAX
 

@@ -121,11 +121,11 @@ main :: proc() {
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 		defer {
-			log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
-			if (len(track.allocation_map) > 0) {
-				for err, entry in track.allocation_map {
-					log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
-				}
+			if len(track.allocation_map) > 0 {
+				log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
+			}
+			for err, entry in track.allocation_map {
+				log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
@@ -150,10 +150,11 @@ main :: proc() {
 	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
 	//load the mesh
 	mesh = buildTestTriangles2()
+	defer delete(mesh)
 	//build BVH of the mesh
-	bvh:= Create(mesh[:])
+	bvh := Create(mesh[:])
 	Build(&bvh, BINS, false)
-	_balancedBVH(bvh)
+	// _balancedBVH(bvh)
 	defer _bvh_Destroy(bvh)
 	//create TLAS struct, this could be done manually, but it is easier to wrap it
 	tlas = Create()
@@ -274,7 +275,9 @@ threadedTile :: proc(task: thread.Task) {
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 		defer {
-			log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
+			if len(track.allocation_map) > 0 {
+				log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
+			}
 			for err, entry in track.allocation_map {
 				log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
 			}
@@ -314,12 +317,12 @@ tile_tick :: proc(tile: int) -> (u32, u32) {
 	return tb, tt
 }
 
-buildTestTriangles2 :: proc(alloc:=context.allocator) -> [dynamic]Shape {
+buildTestTriangles2 :: proc(alloc := context.allocator) -> [dynamic]Shape {
 	data, err := os.read_entire_file("assets/armadillo.tri", alloc)
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)
 	defer delete(pointList)
-	input := make([dynamic]Shape,alloc)
+	input := make([dynamic]Shape, alloc)
 	for line in strings.split_lines_iterator(&iterator) {
 		vals: []string
 		defer delete(vals)

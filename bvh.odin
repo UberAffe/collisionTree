@@ -1,65 +1,42 @@
 package collisiontree
 
 import "core:fmt"
-import "core:log"
 import "core:math"
-import la "core:math/linalg"
-import "core:strings"
-import "core:time"
 
-BuildBVH :: proc(
-	inputTri: []Shape,
+_bvh_Create :: proc(shapes: []Shape, alloc := context.allocator, loc := #caller_location) -> BVH {
+	bvh: BVH
+	bvh.tri = shapes
+	length := len(bvh.tri)
+	bvh.bvhNode = make([dynamic]BVHNode, 0, int(.6 * f32(length)), allocator = alloc, loc = loc)
+	bvh.shapeIdx = make([]u32, length, allocator = alloc, loc = loc)
+	return bvh
+}
+
+_bvh_Destroy :: proc(bvh: BVH) {
+	delete(bvh.shapeIdx)
+	delete(bvh.bvhNode)
+}
+
+_bvh_Build :: proc(
+	colTree: ^BVH,
 	divisionChecks: u32 = 16,
 	longestOnly: bool = false,
+	alloc := context.allocator,
 	loc := #caller_location,
-) -> (
-	BVH,
-	f64,
 ) {
-	// buildTimer:=time.Stopwatch{}
-	// time.stopwatch_start(&buildTimer)
-	// defer{
-	// 	log.logf(log.Level(17),"Build Time: %v",time.stopwatch_duration(buildTimer))
-	// }
 	when PROFILING {profileStart()}
-	colTree := BVH{}
-	colTree.rootNodeIdx = 0
-	colTree.tri = inputTri
-	length := len(colTree.tri)
-	colTree.bvhNode = make([dynamic]BVHNode, 0, int(.6 * f32(length)), loc = loc)
-	colTree.shapeIdx = make([]u32, length, loc = loc)
 	for &t, i in colTree.tri {
 		colTree.shapeIdx[i] = u32(i)
 	}
-	append(&colTree.bvhNode, BVHNode{{}, 0, u32(length)})
+	append(&colTree.bvhNode, BVHNode{{}, 0, u32(len(colTree.tri))})
 	colTree.longestOnly = longestOnly
-	colTree.splitChecks = math.max(divisionChecks, 2)
-	_UpdateNodeBounds(&colTree, colTree.rootNodeIdx)
-	_Subdivide(&colTree, colTree.rootNodeIdx)
-	return colTree, calculateBuildCost(colTree)
-}
-
-//This updates the BLAS bounds to equal the world space equivalent of the bvh
-SetTransform :: proc(blas: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
-	when PROFILING {profileStart()}
-	blas.invTransform = la.matrix4_inverse(transform)
-	blas.bounds = DEFAULTAABB
-	for i in 0 ..< 8 {
-		_GrowAABB(
-			&blas.bounds,
-			_transformPosition(
-				fl3 {
-					i & 1 > 0 ? bvhBounds.upper.x : bvhBounds.lower.x,
-					i & 2 > 0 ? bvhBounds.upper.y : bvhBounds.lower.y,
-					i & 4 > 0 ? bvhBounds.upper.z : bvhBounds.lower.z,
-				},
-				transform,
-			),
-		)
-	}
+	colTree.splitChecks = max(divisionChecks, 2)
+	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
+	_Subdivide(colTree, colTree.rootNodeIdx, 0)
 }
 
 _UpdateNodeBounds :: proc(colTree: ^BVH, nodeIdx: u32, loc := #caller_location) {
+	when PROFILING {profileStart()}
 	colTree.bvhNode[nodeIdx].aabb = DEFAULTAABB
 	for i in 0 ..< colTree.bvhNode[nodeIdx].triCount {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
@@ -67,8 +44,8 @@ _UpdateNodeBounds :: proc(colTree: ^BVH, nodeIdx: u32, loc := #caller_location) 
 	}
 }
 
-_Subdivide :: proc(colTree: ^BVH, nodeIdx: u32) {
-	when PROFILING {profileStart()}
+_Subdivide :: proc(colTree: ^BVH, nodeIdx: u32, depth: int) {
+	when PROFILING {profileStart(fmt.tprint("Subdivide", depth))}
 	if colTree.bvhNode[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
 	parentCost := _calculateNodeCost(colTree.bvhNode[nodeIdx])
@@ -77,19 +54,18 @@ _Subdivide :: proc(colTree: ^BVH, nodeIdx: u32) {
 		s := colTree.tri[colTree.shapeIdx[colTree.bvhNode[nodeIdx].leftFirst + i]]
 		_GrowAABB(&cBound, s.centroid)
 	}
-	bestAxis, bestPos, bestCost := #force_no_inline _findBestSplitPlane(colTree, nodeIdx, cBound)
+	bestAxis, bestPos, bestCost := _findBestSplitPlane(colTree, nodeIdx, cBound)
 	//if no improvement, do not split
 	if bestCost >= parentCost do return
 	//in place partition, at worst this loops over every spot, but it should average to about half or less
 	i := int(colTree.bvhNode[nodeIdx].leftFirst)
 	j := i + int(colTree.bvhNode[nodeIdx].triCount) - 1
 	scale := (f32(colTree.splitChecks) / (cBound.upper[bestAxis] - cBound.lower[bestAxis]))
+	split := cBound.lower[bestAxis]
 	for i <= j {
+		when PROFILING {profileStart("sorting step")}
 		binIdx := math.min(
-			u32(
-				(colTree.tri[colTree.shapeIdx[i]].centroid[bestAxis] - cBound.lower[bestAxis]) *
-				scale,
-			),
+			u32((colTree.tri[colTree.shapeIdx[i]].centroid[bestAxis] - split) * scale),
 			colTree.splitChecks - 1,
 		)
 		if binIdx < bestPos {
@@ -114,33 +90,17 @@ _Subdivide :: proc(colTree: ^BVH, nodeIdx: u32) {
 	colTree.bvhNode[nodeIdx].triCount = 0
 	_UpdateNodeBounds(colTree, leftChildIdx)
 	_UpdateNodeBounds(colTree, leftChildIdx + 1)
-	_Subdivide(colTree, leftChildIdx)
-	_Subdivide(colTree, leftChildIdx + 1)
+	_Subdivide(colTree, leftChildIdx, depth + 1)
+	_Subdivide(colTree, leftChildIdx + 1, depth + 1)
 }
 
-calculateBuildCost :: proc(ct: BVH) -> f64 {
-	cost: f64 = 0
-	for n in ct.bvhNode {
-		if n.triCount == 0 do continue
-		cost += f64(_calculateNodeCost(n))
-	}
-	return cost
-}
-
-_findBestSplitPlane :: proc(
-	colTree: ^BVH,
-	nodeIdx: u32,
-	bound: AABB,
-) -> (
-	int,
-	u32,
-	f32,
-) {
+_findBestSplitPlane :: proc(colTree: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u32, f32) {
 	when PROFILING {profileStart()}
 	node := &colTree.bvhNode[nodeIdx]
 	bestAxis := -1
 	bestPos: u32 = 0
 	bestCost: f32 = MAX
+	bestBalance: f32 = MAX
 	onlyAxis := 0
 	if colTree.longestOnly {
 		range := bound.upper - bound.lower
@@ -187,14 +147,15 @@ _findBestSplitPlane :: proc(
 			_GrowAABB(&rightBox, bins[colTree.splitChecks - 1 - i].bounds)
 			rightArea[colTree.splitChecks - 1 - i] = _areaAABB(rightBox)
 		}
-		// scale = (boundMax - boundMin) / f32(colTree.splitChecks)
 		//find the best split based on the gathered data
 		for i in 0 ..< colTree.splitChecks - 1 {
 			planeCost := leftcount[i] * leftArea[i] + rightcount[i] * rightArea[i]
-			if planeCost < bestCost {
+			balance := math.abs(leftcount[i] * leftArea[i] - rightcount[i] * rightArea[i])
+			if planeCost < bestCost && balance < bestBalance {
 				bestAxis = axis
-				bestPos = i + 1//boundMin  + scale * f32(i + 1)
+				bestPos = i + 1
 				bestCost = planeCost
+				bestBalance = balance
 			}
 		}
 	}

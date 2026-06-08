@@ -29,7 +29,8 @@ TILEH :: 80
 SCALEW :: N / TILEW
 SCALEH :: N / TILEH
 // PROFILING :: #config(profiling, false)
-LOGLEVEL :: #config(llevel, 20)
+LOGLEVEL :: #config(llevel, 0)
+LOGGING :: #config(log, false)
 
 when PROFILING {
 	spall_ctx: spall.Context
@@ -73,10 +74,8 @@ customPool: ^thread.Pool
 customPoolAlloc: mem.Allocator
 taskGroup: sync.Wait_Group
 tex: rl.Texture2D
-textureUpdating: ^sync.Mutex
 batchCount := 32
-original: [dynamic]Shape
-inputTri: [dynamic]Shape
+mesh: [dynamic]Shape
 bWatch: time.Stopwatch
 r: f32 = 0
 lastBuildCost: f64 = 0
@@ -88,11 +87,14 @@ click, release: [2]f32
 deepLog := false
 pixelPeek: [5]uint = {}
 peekColor: [5]rl.Color = {}
-p: [3]fl3 = {{-1, 1, 2}, {1, 1, 2}, {-1, -1, 2}}
-camPos := fl3{0, .5, -4.5} //fl3{0, 3.5, -4.5}
+baseP: [3]fl3 = {{-1, 1, 2}, {1, 1, 2}, {-1, -1, 2}}
+p := baseP
+baseCamPos := fl3{0, .5, -4.5}
+camPos := baseCamPos
 tlas: TLAS
 
 main :: proc() {
+	//logging
 	file, _ := os.open("logs/latest.log", {.Read, .Write, .Append, .Create})
 	defer os.close(file)
 	fLogger := log.create_file_logger(file, log.Level(LOGLEVEL))
@@ -100,6 +102,7 @@ main :: proc() {
 	tLogger = TL.CreateThreadedLogger(fLogger)
 	defer TL.destroy()
 	context.logger = tLogger
+	//profiling
 	when PROFILING {
 		spall_ctx = spall.context_create("profiling/ct.spall")
 		defer spall.context_destroy(&spall_ctx)
@@ -112,6 +115,7 @@ main :: proc() {
 
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
+	//debugging
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
@@ -121,71 +125,56 @@ main :: proc() {
 			if (len(track.allocation_map) > 0) {
 				for err, entry in track.allocation_map {
 					log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
-					// if err!=nil do fmt.println(err)
 				}
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
 	}
+	//prepare threadpool
 	threadCount := os.get_processor_core_count() - 2
 	a := new(mem.Dynamic_Arena)
 	defer free(a)
 	mem.dynamic_arena_init(a)
 	customPoolAlloc = mem.dynamic_arena_allocator(a)
 	defer free_all(customPoolAlloc)
-	textureUpdating = new(sync.Mutex)
-	defer free(textureUpdating)
 	customPool = new(thread.Pool)
 	defer free(customPool)
 	thread.pool_init(customPool, customPoolAlloc, threadCount)
 	thread.pool_start(customPool)
-	// collisionTreeInit(threadCount)
-
+	//prepare image texture
 	pixels = make([dynamic]rl.Color, N * N)
 	defer delete(pixels)
 	for _, i in pixels {
 		pixels[i] = {30, 30, 30, 255}
 	}
 	im := rl.Image{raw_data(pixels), N, N, 1, rl.PixelFormat.UNCOMPRESSED_R8G8B8A8}
-
-	original = buildTestTriangles2()
-	inputTri = make([dynamic]Shape, len(original))
-	copy(inputTri[:], original[:])
-
-	defer delete(original)
-	defer delete(inputTri)
-	bWatch = time.Stopwatch{}
-
-	bvh: BVH
-	bvh, lastBuildCost = BuildBVH(inputTri[:], BINS, false)
-	tlas = Create_TLAS()
-	append(&tlas.bvhList, bvh)
+	//load the mesh
+	mesh = buildTestTriangles2()
+	//build BVH of the mesh
+	bvh:= Create(mesh[:])
+	Build(&bvh, BINS, false)
+	_balancedBVH(bvh)
+	defer _bvh_Destroy(bvh)
+	//create TLAS struct, this could be done manually, but it is easier to wrap it
+	tlas = Create()
+	defer TLAS_Destroy(tlas)
+	//create the lower level blas entries
+	append(&tlas.bvhList, &bvh)
 	append(&tlas.blas, BLAS{bvhIndex = 0}, BLAS{bvhIndex = 0})
-	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
-	m2 := la.matrix4_translate(fl3{1.3, 0, 0})
-	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
-	SetTransform(&tlas.blas[1], tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
-	Build_TLAS(&tlas)
 
-	balancedBVH(tlas.bvhList[0])
-	defer {
-		Destroy_TLAS(tlas)
-		// delete(tree.bvhNode)
-		// delete(tree.shapeIdx)
-		// free(tree)
-	}
-
+	//Init raylib stuff
 	rl.InitWindow(640, 640, "test")
 	tex = rl.LoadTextureFromImage(im)
-
-	frame: u64 = 0
-	when !PROFILING {
+	//whe profiling, only run for a single frame
+	when PROFILING {
+		Frame(0)
+	} else {
+		frame: u64 = 0
 		for !rl.WindowShouldClose() {
 			Frame(frame)
 			frame += 1
 		}
 	}
-	when PROFILING {Frame(0)}
 
 }
 
@@ -199,58 +188,18 @@ Frame :: proc(frame: u64) {
 		width = uint(max(click.x, release.x)) - xOff
 		height = uint(max(click.y, release.y)) - yOff
 	}
-	if rl.IsKeyReleased(.L) do deepLog = !deepLog
-	if rl.IsMouseButtonReleased(.RIGHT) {
-		pos := rl.GetMousePosition()
-		center := uint(pos.x + pos.y * 640)
-		pixelPeek[0] = center
-		pixelPeek[1] = center + 1
-		pixelPeek[2] = center - 1
-		pixelPeek[3] = center + 640
-		pixelPeek[4] = center - 640
-		for i in 0 ..< len(peekColor) {
-			peekColor[i] = rl.Color{200, 100, 100, 255}
-		}
-		texUpdate = true
-	}
-	if rl.IsKeyReleased(.SPACE) {
-		if deepLog {
-			tLogger.lowest_level = log.Level(0)
-
-		} else {
-			tLogger.lowest_level = log.Level(LOGLEVEL)
-		}
-		context.logger = tLogger
-		fmt.println(deepLog)
-		fmt.println(context.logger.lowest_level)
-		for i in 0 ..< len(pixelPeek) {
-			// _immediateIntersect(tree, pixelPeek[i] % 640, pixelPeek[i] / 640)
-			peekColor[i] = pixels[pixelPeek[i]]
-			peekColor[i].g += 30
-			peekColor[i].r -= 5
-			peekColor[i].b += 10
-		}
-		texUpdate = true
-		tLogger.lowest_level = log.Level(LOGLEVEL)
-		context.logger = tLogger
-	}
-
-	log.logf(log.Level(11), "frame %v start", frame)
 	time.stopwatch_reset(&frameWatch)
 	time.stopwatch_start(&frameWatch)
 
 	rl.BeginDrawing()
 	rl.ClearBackground(rl.WHITE)
-	// if rl.IsKeyPressed(.ENTER) || frame == 1 {
 	for _, i in pixels {
 		pixels[i] = {30, 30, 30, 255}
 	}
 	time.stopwatch_reset(&searchWatch)
 	time.stopwatch_start(&searchWatch)
-	// FullDepthScan()
 	_tick(f32(frame) / 10)
 	time.stopwatch_stop(&searchWatch)
-	// animate()
 	if texUpdate {
 		if peekColor[0].a != 0 {
 			for i in 0 ..< len(pixelPeek) {
@@ -260,7 +209,6 @@ Frame :: proc(frame: u64) {
 		rl.UpdateTexture(tex, raw_data(pixels))
 		texUpdate = false
 	}
-
 
 	rl.DrawTexture(tex, 0, 0, rl.WHITE)
 	rl.DrawFPS(10, 10)
@@ -278,81 +226,60 @@ Frame :: proc(frame: u64) {
 		16,
 		{150, 180, 150, 255},
 	)
-	log.logf(log.Level(1), "Frame time %v", time.stopwatch_duration(frameWatch))
-
+	when LOGGING {log.logf(log.Level(1), "Frame time %v", time.stopwatch_duration(frameWatch))}
 	rl.EndDrawing()
-}
-
-FullDepthScan :: proc {
-	_threadedFullDepthScan,
-// _fullDepthScan,
-}
-
-_threadedFullDepthScan :: proc(task: thread.Task) {
-	when PROFILING {
-		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
-		defer delete(buffer_backing)
-
-		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
-		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
-
-		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
-	}
-	context.logger = tLogger
-	context.allocator = task.allocator
-	// _fullDepthScan()
-}
-
-rollCamera :: proc(rollBy: f32) {
-	for &corner in p {
-		corner = _transformPosition(corner, la.matrix4_rotate(rollBy, fl3{0, 0, 1}))
-	}
 }
 
 swingCamera :: proc(angle: f32) {
 	dist := la.distance(fl3{}, camPos)
-	r := la.matrix4_rotate(angle,fl3{0,1,0})
-	camPos = _transformPosition(camPos, r)
-	for &corner in p {
+	r := la.matrix4_rotate(angle, fl3{0, 1, 0})
+	camPos = _transformPosition(baseCamPos, r)
+	for corner, i in baseP {
 		dist = la.distance(fl3{}, corner)
-		corner = _transformPosition(corner, r)
+		p[i] = _transformPosition(corner, r)
 	}
 }
 
 _tick :: proc(dt: f32) {
 	when PROFILING {profileStart()}
-	angle := math.sin(dt)
-	// rollCamera(angle/4)
-	swingCamera(dt/40)
+	angle := dt / 4
+	swingCamera(angle)
 	m1 := la.matrix4_translate(fl3{-1.3, 0, 0})
 	m2 := la.matrix4_translate(fl3{1.3, 0, 0}) * la.matrix4_rotate(angle, fl3{0, 1, 0})
 	SetTransform(&tlas.blas[0], tlas.bvhList[tlas.blas[0].bvhIndex].bvhNode[0].aabb, m1)
 	SetTransform(&tlas.blas[1], tlas.bvhList[tlas.blas[1].bvhIndex].bvhNode[0].aabb, m2)
-	Build_TLAS(&tlas)
-	// fmt.println(tlas.tlasNode[:])
-	// fmt.println(tlas.blas[:])
+	_tlas_Build(&tlas)
 	tb, tt: u32
 	sync.wait_group_add(&taskGroup, TILEW * TILEH)
 	for tile in 0 ..< TILEW * TILEH {
 		thread.pool_add_task(customPool, context.allocator, threadedTile, nil, tile)
-		// b,t:=tile_tick(tile)
-		// tb+=tb
-		// tt+=t
 	}
 	sync.wait_group_wait(&taskGroup)
-	log.logf(log.Level(19), "Total AABB checks: %v, Total Tri checks: %v", tb, tt)
+	when LOGGING {log.logf(log.Level(19), "Total AABB checks: %v, Total Tri checks: %v", tb, tt)}
 	texUpdate = true
 }
 
 threadedTile :: proc(task: thread.Task) {
 	when PROFILING {
 		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
-		defer delete(buffer_backing)
-
 		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
-		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
-
+		defer {
+			spall.buffer_destroy(&spall_ctx, &spall_buffer)
+			delete(buffer_backing)
+		}
 		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+	}
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+		defer {
+			log.warnf("tracking allocator output starts here: %v", len(track.allocation_map))
+			for err, entry in track.allocation_map {
+				log.warnf("%v leaked %v bytes\n", entry.location, entry.size)
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
 	}
 	context.logger = tLogger
 	tile_tick(task.user_index)
@@ -377,145 +304,22 @@ tile_tick :: proc(tile: int) -> (u32, u32) {
 			ray.D = la.normalize(pixelPos - ray.O)
 			ray.rD = 1 / ray.D
 			ray.t = MAX
-			bIt, tIt, shapeID := Intersect_TLAS(tlas, &ray)
+			bIt, tIt, shapeID := Intersect(tlas, &ray)
 			tb += bIt
 			tt += tIt
-			c: u8 = u8(255 - (ray.t - 3) * 80)
+			c: u8 = u8(240 - (ray.t - 3) * 50)
 			pixels[(x * SCALEW + u) + (y * SCALEH + v) * 640] = rl.Color{c, c, c, 255}.rgba
 		}
 	}
 	return tb, tt
 }
 
-// _immediateIntersect :: proc(bvh: ^CollisionTree, x, y: uint) {
-// 	ray: Ray
-// 	ray.O = camPos
-// 	pixelPos := ray.O + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y) / 640)
-// 	ray.D = la.normalize(pixelPos - ray.O)
-// 	ray.t = MAX
-// 	ray.rD = 1 / ray.D
-// 	b, t, id := _intersectBVH(bvh, &ray)
-// 	c: u8 = u8(255 - (ray.t - 4) * 180)
-// 	pixels[(x) + (y) * 640] = rl.Color{c, c, c, 255}.rgba
-// }
-
-// _fullDepthScan :: proc() {
-// 	time.stopwatch_reset(&bWatch)
-// 	time.stopwatch_start(&bWatch)
-// 	if math.abs(lastBuildCost - lastRefitCost) < lastBuildCost * .2 {
-// 		lastRefitCost = RefitBVH(tree)
-// 		time.stopwatch_stop(&bWatch)
-// 		log.logf(
-// 			log.Level(17),
-// 			"refitting with a cost of %v and it took %v",
-// 			lastRefitCost,
-// 			time.stopwatch_duration(bWatch),
-// 		)
-// 	} else {
-// 		if tree != nil {
-// 			delete(tree.bvhNode)
-// 			delete(tree.shapeIdx)
-// 			free(tree)
-// 		}
-// 		tree, lastBuildCost = BuildBVH(inputTri[:], BINS, true)
-// 		time.stopwatch_stop(&bWatch)
-// 		lastRefitCost = lastBuildCost
-// 		log.logf(
-// 			log.Level(17),
-// 			"rebuilding with a cost of %v and it took %v",
-// 			lastBuildCost,
-// 			time.stopwatch_duration(bWatch),
-// 		)
-// 	}
-
-// 	rays := make([dynamic]Ray, int(width * height))
-// 	defer delete(rays)
-// 	for &ray, i in rays {
-// 		y := uint(i) / uint(width) + uint(yOff)
-// 		x := uint(i) % uint(width) + uint(xOff)
-// 		ray.O = camPos
-// 		ray.D = la.normalize(
-// 			(camPos + p.x + (p.y - p.x) * (f32(x) / 640) + (p.z - p.x) * (f32(y + 0) / 640)) -
-// 			ray.O,
-// 		)
-// 		ray.rD = 1 / ray.D
-// 		ray.t = MAX
-// 	}
-// 	count: int
-// 	searchTime = 0
-// 	time.stopwatch_reset(&bWatch)
-// 	time.stopwatch_start(&bWatch)
-// 	response := BatchResponse{}
-// 	batchedScan(tree, &response, rays[:])
-// 	time.stopwatch_stop(&bWatch)
-// 	for hit in response.hits {
-// 		v := u8(255 - (hit.dist - 3.5946209) * 122.2661821)
-// 		pixels[hit.rayID] = rl.Color{v, v, v, 255}.rgba
-// 	}
-// 	log.logf(
-// 		log.Level(17),
-// 		"summed search time of %v with observed search of %v | %v AABB checks and %v shape checks performed",
-// 		response.searchTime,
-// 		time.stopwatch_duration(bWatch),
-// 		response.boundsChecks,
-// 		response.shapeChecks,
-// 	)
-// 	texUpdate = true
-// 	ready = true
-// 	batchCount -= 1
-// 	if batchCount == 0 do batchCount = 32
-// }
-
-animate :: proc() {
-	r += .05
-	if r > math.TAU do r -= math.TAU
-	a := math.sin(r) * .1 //.5*.2
-	for i in 0 ..< len(original) {
-		for j in 0 ..< 3 {
-			o: fl3
-			switch type in original[i].type {
-			case Tri:
-				o = type.vertex[j]
-			}
-			s := a * (o.y - .2)
-			x := o.x * math.cos(s) - o.y * math.sin(s)
-			y := o.x * math.sin(s) + o.y * math.cos(s)
-			#partial switch &type in inputTri[i].type {
-			case Tri:
-				type.vertex[j] = fl3{x, y, o.z}
-				if j == 2 do inputTri[i].aabb = _getTriangleAABB(type)
-			}
-		}
-
-	}
-}
-
-buildTestTriangles :: proc() -> []^Shape {
-	input := make([]^Shape, TEST)
-	rand.reset(12345678910)
-	rf := rand.float32_uniform
-	for &t, i in input {
-		triangle := Tri{}
-		r0 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
-		r1 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
-		r2 := fl3{rf(-3, 1), rf(-3, 1), rf(-3, 1)}
-		triangle.vertex[0] = r0 //r0 * 9 - fl3{5, 5, 5}
-		triangle.vertex[1] = r1 //triangle.vertex0 + r1 * 2
-		triangle.vertex[2] = r2 //triangle.vertex0 + r2 * 2
-		input[i] = new(Shape)
-		input[i].aabb = _getTriangleAABB(triangle)
-		input[i].type = triangle
-		input[i].centroid = (triangle.vertex[0] + triangle.vertex[1] + triangle.vertex[2]) / 3
-	}
-	return input
-}
-
-buildTestTriangles2 :: proc() -> [dynamic]Shape {
-	data, err := os.read_entire_file("assets/armadillo.tri", context.allocator)
+buildTestTriangles2 :: proc(alloc:=context.allocator) -> [dynamic]Shape {
+	data, err := os.read_entire_file("assets/armadillo.tri", alloc)
 	iterator := string(data)
 	pointList := make([dynamic]f32, 9, 9)
 	defer delete(pointList)
-	input := make([dynamic]Shape)
+	input := make([dynamic]Shape,alloc)
 	for line in strings.split_lines_iterator(&iterator) {
 		vals: []string
 		defer delete(vals)

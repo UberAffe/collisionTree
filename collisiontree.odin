@@ -1,64 +1,39 @@
 package collisiontree
 
-import "base:runtime"
-import enc "core:encoding/json"
-import "core:fmt"
-import "core:os"
-import time "core:time"
+import la "core:math/linalg"
 
 PROFILING :: #config(ctprofiling, false)
 
-// batchedScan::proc(colTree:BLAS,blas:BVH,rc:^BatchResponse,rays:[]Ray,offset:u32=0){
-// 	rc.searchTime = 0
-// 	sw := time.Stopwatch{}
-// 	tb: u32 = 0
-// 	tt: u32 = 0
-// 	for &ray, i in rays {
-// 		time.stopwatch_start(&sw)
-// 		b, t, sID := _intersectBVH(colTree,blas, &ray)
-// 		time.stopwatch_stop(&sw)
-// 		tb += b
-// 		tt += t
-// 		if ray.t < MAX && sID >= 0 {
-// 			key := u32(i) + offset
-// 			append(&rc.hits, Hit{key, sID, ray.t})
-// 		}
-// 	}
-	
-// 	rc.searchTime = time.stopwatch_duration(sw)
-// 	rc.boundsChecks=tb
-// 	rc.shapeChecks=tt
-// }
-
-saveBVH :: proc(path: string, colTree: ^BLAS) -> int {
-	file, err := os.open(path, {.Create, .Write, .Read})
-	if err != nil {
-		fmt.printfln("file error: %v", err)
-		return 0
+//This updates the BLAS bounds to equal the world space equivalent of the bvh
+SetTransform :: proc(blas: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
+	when PROFILING {profileStart()}
+	blas.invTransform = la.matrix4_inverse(transform)
+	blas.bounds = DEFAULTAABB
+	for i in 0 ..< 8 {
+		_GrowAABB(
+			&blas.bounds,
+			_transformPosition(
+				fl3 {
+					i & 1 > 0 ? bvhBounds.upper.x : bvhBounds.lower.x,
+					i & 2 > 0 ? bvhBounds.upper.y : bvhBounds.lower.y,
+					i & 4 > 0 ? bvhBounds.upper.z : bvhBounds.lower.z,
+				},
+				transform,
+			),
+		)
 	}
-	defer os.close(file)
-	binary, encError := enc.marshal(colTree^, {})
-	if encError != nil {
-		fmt.printfln("encoding error:%v", encError)
-		return 0
-	}
-	defer delete(binary)
-	written, writeEr := os.write(file, binary)
-	if writeEr != nil {
-		fmt.printfln("write error: %v", writeEr)
-		return 0
-	}
-	return written
 }
 
-loadBVH :: proc(path: string, inputTri: []Shape) -> ^BLAS {
-	file, err := os.open(path, {.Create, .Write, .Read})
-	defer os.close(file)
-	if err != nil do return nil
-	binary, _ := os.read_entire_file(file, context.allocator)
-	colTree := new(BLAS)
-	// unerr := enc.unmarshal(binary, colTree)
-	// if unerr != nil do return nil
-	// colTree.tri = inputTri
-	return colTree
+calculateBuildCost :: proc(ct: BVH) -> f64 {
+	cost: f64 = 0
+	for n in ct.bvhNode {
+		if n.triCount == 0 do continue
+		cost += f64(_calculateNodeCost(n))
+	}
+	return cost
 }
+
+Create::proc{TLAS_Create,_bvh_Create}
+Destroy::proc{TLAS_Destroy,_bvh_Destroy}
+Intersect::proc{_intersect_TLAS,_intersectBVH,_intersectShape}
+Build::proc{_bvh_Build,_tlas_Build}

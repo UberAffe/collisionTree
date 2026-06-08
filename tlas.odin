@@ -1,23 +1,22 @@
 package collisiontree
 
 import "core:fmt"
-import "core:log"
-import "core:sync"
-Create_TLAS :: proc() -> TLAS {
+
+TLAS_Create :: proc(alloc:=context.allocator) -> TLAS {
 	tlas: TLAS
-	tlas.bvhList = make([dynamic]BVH)
-	tlas.blas = make([dynamic]BLAS)
-	tlas.tlasNode = make([dynamic]TLASNode)
+	tlas.bvhList = make([dynamic]^BVH,alloc)
+	tlas.blas = make([dynamic]BLAS,alloc)
+	tlas.tlasNode = make([dynamic]TLASNode,alloc)
 	return tlas
 }
 
-Destroy_TLAS :: proc(tlas: TLAS) {
+TLAS_Destroy :: proc(tlas: TLAS) {
 	delete(tlas.bvhList)
 	delete(tlas.blas)
 	delete(tlas.tlasNode)
 }
 
-Build_TLAS :: proc(tlas: ^TLAS) {
+_tlas_Build :: proc(tlas: ^TLAS) {
 	//reserve index 0 for the root
 	clear(&tlas.tlasNode)
 	append(&tlas.tlasNode, TLASNode{})
@@ -30,10 +29,9 @@ Build_TLAS :: proc(tlas: ^TLAS) {
 		append(&tlas.tlasNode, TLASNode{tlas.blas[i].bounds, {}, uint(i)})
 	}
 	A: i32 = 0
-	B := FindBestMatch(nodeIdx[:], nodeIndices, A)
+	B := _findBestMatch(nodeIdx[:], nodeIndices, A)
 	for nodeIndices > 1 {
-		C := FindBestMatch(nodeIdx[:], nodeIndices, B)
-		// fmt.println(A,B,C)
+		C := _findBestMatch(nodeIdx[:], nodeIndices, B)
 		//if they are eachother's best match then pair them
 		if A == C {
 			bounds := DEFAULTAABB
@@ -44,7 +42,7 @@ Build_TLAS :: proc(tlas: ^TLAS) {
 			nodeIdx[A] = i32(len(tlas.tlasNode) - 1)
 			nodeIndices -= 1
 			nodeIdx[B] = nodeIdx[nodeIndices]
-			B = FindBestMatch(nodeIdx[:], nodeIndices, A)
+			B = _findBestMatch(nodeIdx[:], nodeIndices, A)
 			continue
 		}
 		A = B
@@ -54,7 +52,7 @@ Build_TLAS :: proc(tlas: ^TLAS) {
 
 }
 
-FindBestMatch :: proc(list: []i32, n, a: i32) -> i32 {
+_findBestMatch :: proc(list: []i32, n, a: i32) -> i32 {
 	smallest: f32 = MAX
 	bestB: i32 = -1
 	for b in i32(0) ..< n {
@@ -72,12 +70,10 @@ FindBestMatch :: proc(list: []i32, n, a: i32) -> i32 {
 	return bestB
 }
 
-Intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
+_intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
 	when PROFILING {profileStart()}
 	node := tlas.tlasNode[0]
 	idStack := [dynamic; 64]i32{}
-	// append(&idStack, node.left)
-	// i := 0
 	tb, tt: u32 = 0, 0
 	closest := -1
 	for {

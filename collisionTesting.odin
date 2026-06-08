@@ -28,7 +28,6 @@ TILEW :: 80
 TILEH :: 80
 SCALEW :: N / TILEW
 SCALEH :: N / TILEH
-// PROFILING :: #config(profiling, false)
 LOGLEVEL :: #config(llevel, 0)
 LOGGING :: #config(log, false)
 
@@ -158,9 +157,9 @@ main :: proc() {
 	defer _bvh_Destroy(bvh)
 	//create TLAS struct, this could be done manually, but it is easier to wrap it
 	tlas = Create()
-	defer TLAS_Destroy(tlas)
+	defer _tlas_Destroy(tlas)
 	//create the lower level blas entries
-	append(&tlas.bvhList, &bvh)
+	append(&tlas.bvhList, bvh)
 	append(&tlas.blas, BLAS{bvhIndex = 0}, BLAS{bvhIndex = 0})
 
 	//Init raylib stuff

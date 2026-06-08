@@ -110,7 +110,7 @@ BLAS :: struct #align (64) {
 
 TLAS :: struct {
 	tlasNode: [dynamic]TLASNode,
-	bvhList:  [dynamic]^BVH,
+	bvhList:  [dynamic]BVH,
 	blas:     [dynamic]BLAS,
 }
 

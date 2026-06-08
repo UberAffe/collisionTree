@@ -2,15 +2,15 @@ package collisiontree
 
 import "core:fmt"
 
-TLAS_Create :: proc(alloc:=context.allocator) -> TLAS {
+_tlas_Create :: proc(alloc:=context.allocator) -> TLAS {
 	tlas: TLAS
-	tlas.bvhList = make([dynamic]^BVH,alloc)
+	tlas.bvhList = make([dynamic]BVH,alloc)
 	tlas.blas = make([dynamic]BLAS,alloc)
 	tlas.tlasNode = make([dynamic]TLASNode,alloc)
 	return tlas
 }
 
-TLAS_Destroy :: proc(tlas: TLAS) {
+_tlas_Destroy :: proc(tlas: TLAS) {
 	delete(tlas.bvhList)
 	delete(tlas.blas)
 	delete(tlas.tlasNode)
@@ -70,7 +70,7 @@ _findBestMatch :: proc(list: []i32, n, a: i32) -> i32 {
 	return bestB
 }
 
-_intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
+_tlas_Intersect :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
 	when PROFILING {profileStart()}
 	node := tlas.tlasNode[0]
 	idStack := [dynamic; 64]i32{}
@@ -80,7 +80,7 @@ _intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
 		when PROFILING {profileStart("TLAS scan")}
 		if isLeaf(node.leftRight) {
 			when PROFILING {profileStart(fmt.tprint("TLAS leaf", node.blasIdx))}
-			bIt, tIt, shapeID := _intersectBVH(tlas, node.blasIdx, ray)
+			bIt, tIt, shapeID := Intersect(tlas, node.blasIdx, ray)
 			closest = shapeID
 			tb += bIt
 			tt += tIt
@@ -92,8 +92,8 @@ _intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray) -> (u32, u32, int) {
 		childIdx1 := node.left
 		childIdx2 := node.right
 		tb += 2
-		dist1 := _intersectAABBFloat(ray^, tlas.tlasNode[childIdx1].aabb)
-		dist2 := _intersectAABBFloat(ray^, tlas.tlasNode[childIdx2].aabb)
+		dist1 := _aabb_Intersect(ray^, tlas.tlasNode[childIdx1].aabb)
+		dist2 := _aabb_Intersect(ray^, tlas.tlasNode[childIdx2].aabb)
 		//ensure that the nearest child is child1
 		if dist1 > dist2 {
 			_swap(&dist1, &dist2)

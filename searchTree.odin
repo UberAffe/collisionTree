@@ -26,7 +26,7 @@ _bvh_Intersect :: proc(bvh: BVH, ray: ^Ray) -> (u32, u32, int) {
 	bvhIterations := u32(0)
 	triIterations := u32(0)
 	sID := -1
-	node := bvh.bvhNode[bvh.rootNodeIdx]
+	node := bvh.node[bvh.rootNodeIdx]
 	idStack := [dynamic; 64]u32{}
 	for {
 		when PROFILING {profileStart("Node scan")}
@@ -35,9 +35,9 @@ _bvh_Intersect :: proc(bvh: BVH, ray: ^Ray) -> (u32, u32, int) {
 			prevT: f32
 			for i in 0 ..< node.triCount {
 				prevT = ray.t
-				curID := int(bvh.shapeIdx[node.leftFirst + i])
+				curID := int(bvh.shapeIdx[node.leftChild + i])
 				when LOGGING {log.logf(log.Level(10), "checking triangle %v", curID)}
-				_shape_Intersect(bvh.tri[curID], ray)
+				_shape_Intersect(bvh.shape[curID], ray)
 				if ray.t < prevT {
 					when LOGGING {log.logf(log.Level(10), "updating t")}
 					sID = curID
@@ -47,14 +47,14 @@ _bvh_Intersect :: proc(bvh: BVH, ray: ^Ray) -> (u32, u32, int) {
 			if len(idStack) == 0 do break
 			id := pop(&idStack)
 			when LOGGING {log.logf(log.Level(10), "id %v is the new node", id)}
-			node = bvh.bvhNode[id]
+			node = bvh.node[id]
 			continue
 		}
 		when PROFILING {profileStart("Branch node")}
-		id := node.leftFirst
+		id := node.leftChild
 		id2 := id + 1
-		dist1 := _aabb_Intersect(ray^, bvh.bvhNode[id].aabb)
-		dist2 := _aabb_Intersect(ray^, bvh.bvhNode[id2].aabb)
+		dist1 := _aabb_Intersect(ray^, bvh.node[id].aabb)
+		dist2 := _aabb_Intersect(ray^, bvh.node[id2].aabb)
 		bvhIterations += 2
 		if dist1 > dist2 {
 			_swap(&dist1, &dist2)
@@ -64,9 +64,9 @@ _bvh_Intersect :: proc(bvh: BVH, ray: ^Ray) -> (u32, u32, int) {
 		if dist1 == MAX {
 			if len(idStack) == 0 do break
 			id = pop(&idStack)
-			node = bvh.bvhNode[id]
+			node = bvh.node[id]
 		} else {
-			node = bvh.bvhNode[id]
+			node = bvh.node[id]
 			if dist2 != MAX {
 				when LOGGING {log.logf(log.Level(10), "id %v added to the stack", id + 1)}
 				append(&idStack, id2)

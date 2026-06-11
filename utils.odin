@@ -2,11 +2,11 @@ package collisiontree
 
 import "core:fmt"
 import "core:log"
+import "core:math"
 import la "core:math/linalg"
 import "core:mem"
 import "core:thread"
 import "core:time"
-import "core:math"
 
 MAX :: math.INF_F32
 MIN :: -MAX
@@ -22,9 +22,9 @@ AABB :: struct {
 DEFAULTAABB :: AABB{{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 
 BVHNode :: struct #align (32) {
-	using aabb: AABB `json:"aabb"`, 
-	leftFirst:  u32 `json:"leftFirst"`,
-	triCount:   u32 `json:"triCount"`,
+	using aabb: AABB `json:"aabb"`,
+	leftChild:  i32 `json:"leftFirst"`,
+	leafID:   i32 `json:"triCount"`,
 	//total size 32 bytes
 }
 
@@ -32,7 +32,12 @@ LeftRight :: struct #align (8) {
 	left:  i32,
 	right: i32,
 }
-isLeaf :: proc(lr: LeftRight) -> bool {return transmute(uint)lr == 0}
+isLeaf :: proc {
+	_tlas_isLeaf,
+	_bvh_isLeaf,
+}
+_tlas_isLeaf :: proc(lr: LeftRight) -> bool {return transmute(uint)lr == 0}
+_bvh_isLeaf :: proc(node: BVHNode) -> bool {return node.leftChild > 0}
 
 TLASNode :: struct {
 	using aabb:      AABB,
@@ -50,7 +55,7 @@ Tri :: struct {
 	vertex: [3]fl3,
 }
 
-Square::AABB
+Square :: distinct AABB
 
 ShapeType :: union {
 	Tri,
@@ -94,9 +99,10 @@ TaskRunner :: struct {
 }
 
 BVH :: struct {
-	bvhNode:     [dynamic]BVHNode `json:"bvhNode"`,
-	tri:         []Shape `json:"-"`,
-	shapeIdx:    []u32 `json:"shapeIdx"`,
+	node:     [dynamic]BVHNode `json:"bvhNode"`,
+	shape:         []Shape `json:"-"`,
+	leafs:       [dynamic][dynamic]u32,
+	// shapeIdx:    [dynamic]u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
 	splitChecks: u32 `json:"splitChecks"`,
 	longestOnly: bool `json:"longestOnly"`,
@@ -136,12 +142,12 @@ _growAABBWithNode :: proc(node: ^BVHNode, leaf: AABB) {
 _growAABBWithChildren :: proc(node: ^BVHNode, ct: ^BVH) {
 	when PROFILING {profileStart()}
 	node.aabb.lower = _fminf(
-		ct.bvhNode[node.leftFirst].aabb.lower,
-		ct.bvhNode[node.leftFirst + 1].aabb.lower,
+		ct.node[node.leftChild].aabb.lower,
+		ct.node[node.leftChild + 1].aabb.lower,
 	)
 	node.aabb.upper = _fmaxf(
-		ct.bvhNode[node.leftFirst].aabb.upper,
-		ct.bvhNode[node.leftFirst + 1].aabb.upper,
+		ct.node[node.leftChild].aabb.upper,
+		ct.node[node.leftChild + 1].aabb.upper,
 	)
 }
 
@@ -151,10 +157,13 @@ _growAABBWithPoint :: proc(bounds: ^AABB, point: fl3) {
 	bounds.upper = _fmaxf(bounds.upper, point)
 }
 
-_calculateNodeCost :: proc(node: BVHNode) -> f32 {
+_calculateNodeCost :: proc(bvh:BVH,node: BVHNode) -> f32 {
 	when PROFILING {profileStart()}
 	extent := node.aabb.upper - node.aabb.lower
-	return max(f32(node.triCount),1) * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x)
+	return(
+		f32(len(bvh.leafs[node.leafID])) *
+		(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x) \
+	)
 }
 
 _calculateSurfaceArea :: proc(aabb: AABB) -> f32 {
@@ -206,11 +215,11 @@ _balancedBVH :: proc(bvh: BVH) {
 	balance :: struct {
 		avgInbalance: f32,
 		maxInbalance: f32,
-		balance: string,
-		lB, rB:  int,
-		lL, rL:  int,
-		lT, rT:  u32,
-		maxT:    u32,
+		balance:      string,
+		lB, rB:       int,
+		lL, rL:       int,
+		lT, rT:       u32,
+		maxT:         u32,
 	}
 	dir :: enum {
 		left,
@@ -219,7 +228,7 @@ _balancedBVH :: proc(bvh: BVH) {
 	}
 	idStack := make([dynamic]u32)
 	dirStack := make([dynamic]dir)
-	defer{
+	defer {
 		delete(idStack)
 		delete(dirStack)
 	}
@@ -227,31 +236,34 @@ _balancedBVH :: proc(bvh: BVH) {
 	left, right := 0, 0
 	append(&idStack, bvh.rootNodeIdx)
 	append(&dirStack, dir.first)
-	l:=bvh.bvhNode[bvh.rootNodeIdx].leftFirst
-	balanceList:= make([dynamic]f32)
-	append(&balanceList,_calculateNodeCost(bvh.bvhNode[l])-_calculateNodeCost(bvh.bvhNode[l+1]))
+	l := bvh.node[bvh.rootNodeIdx].leftChild
+	balanceList := make([dynamic]f32)
+	append(
+		&balanceList,
+		_calculateNodeCost(bvh,bvh.node[l]) - _calculateNodeCost(bvh,bvh.node[l + 1]),
+	)
 	for {
 		breadth := len(idStack)
 		b: balance
-		for bal in balanceList{
-			b.avgInbalance+=bal
-			b.maxInbalance=abs(b.maxInbalance)<abs(bal)? bal: b.maxInbalance
+		for bal in balanceList {
+			b.avgInbalance += bal
+			b.maxInbalance = abs(b.maxInbalance) < abs(bal) ? bal : b.maxInbalance
 		}
-		b.avgInbalance/=f32(len(balanceList))
-		b.balance=fmt.aprint(balanceList[:],sep=", ")
+		b.avgInbalance /= f32(len(balanceList))
+		b.balance = fmt.aprint(balanceList[:], sep = ", ")
 		clear(&balanceList)
 		defer delete(b.balance)
 		#reverse for id, i in idStack {
 			if i < breadth {
-				if bvh.bvhNode[id].triCount > 0 { 	//this is a leaf node
-					b.maxT = max(bvh.bvhNode[id].triCount, b.maxT)
+				if bvh.node[id].triCount > 0 { 	//this is a leaf node
+					b.maxT = max(bvh.node[id].triCount, b.maxT)
 					switch dirStack[i] {
 					case .left:
 						b.lL += 1
-						b.lT += bvh.bvhNode[id].triCount
+						b.lT += bvh.node[id].triCount
 					case .right:
 						b.rL += 1
-						b.rT += bvh.bvhNode[id].triCount
+						b.rT += bvh.node[id].triCount
 					case .first:
 					}
 					// b.nodes -= 1
@@ -263,8 +275,12 @@ _balancedBVH :: proc(bvh: BVH) {
 						b.rB += 1
 					case .first:
 					}
-					l=bvh.bvhNode[id].leftFirst
-					append(&balanceList,_calculateNodeCost(bvh.bvhNode[l])-_calculateNodeCost(bvh.bvhNode[l+1]))
+					l = bvh.node[id].leftChild
+					append(
+						&balanceList,
+						_calculateNodeCost(bvh.node[l]) -
+						_calculateNodeCost(bvh.node[l + 1]),
+					)
 					append(&idStack, l, l + 1)
 					append(&dirStack, dir.left, dir.right)
 				}

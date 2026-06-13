@@ -7,56 +7,49 @@ _bvh_Create :: proc(shapes: []Shape, alloc := context.allocator, loc := #caller_
 	bvh: BVH
 	bvh.shape = shapes
 	length := len(bvh.shape)
-	bvh.node = make([dynamic]BVHNode, 0, int(.6 * f32(length)), allocator = alloc, loc = loc)
-	bvh.leafs = make([dynamic][dynamic]u32, allocator = alloc, loc = loc)
+	bvh.node = make_soa(#soa[dynamic]BVHNode, 0, int(.6 * f32(length)), allocator = alloc, loc = loc)
 	return bvh
 }
 
 _bvh_Destroy :: proc(bvh: BVH) {
-	for list in bvh.leafs{
-		delete(list)
-	}
-	delete(bvh.leafs)
 	delete(bvh.node)
 }
 
 _bvh_Build :: proc(
-	colTree: ^BVH,
+	bvh: ^BVH,
 	divisionChecks: u32 = 16,
 	longestOnly: bool = false,
 	alloc := context.allocator,
 	loc := #caller_location,
 ) {
 	when PROFILING {profileStart()}
-	append(&colTree.leafs,make([dynamic]u32,allocator=colTree.leafs.allocator))
-	for &t, i in colTree.shape {
-		append(&colTree.leafs[i],u32(i))
+	append(&bvh.node, BVHNode{{},0,make([dynamic]u32)})
+	for &t, i in bvh.shape {
+		append(&bvh.node[0].shapeIDs,u32(i))
 	}
-	append(&colTree.node, BVHNode{})
-	colTree.longestOnly = longestOnly
-	colTree.splitChecks = max(divisionChecks, 2)
-	_UpdateNodeBounds(colTree, colTree.rootNodeIdx)
-	_Subdivide(colTree, colTree.rootNodeIdx, 0)
+	bvh.longestOnly = longestOnly
+	bvh.splitChecks = max(divisionChecks, 2)
+	_UpdateNodeBounds(bvh, bvh.rootNodeIdx)
+	_Subdivide(bvh, bvh.rootNodeIdx, 0)
 }
 
 _UpdateNodeBounds :: proc(bvh: ^BVH, nodeIdx: u32, loc := #caller_location) {
 	when PROFILING {profileStart()}
 	bvh.node[nodeIdx].aabb = DEFAULTAABB
-	for i in 0 ..< len(bvh.leafs[bvh.node[nodeIdx].leafID]) {
-		s := bvh.shape[bvh.leafs[bvh.node[nodeIdx].leafID][i]]
+	for shapeID in bvh.node[nodeIdx].shapeIDs {
+		s := bvh.shape[shapeID]
 		_GrowAABB(&bvh.node[nodeIdx], s.aabb)
 	}
 }
 
 _Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int) {
 	when PROFILING {profileStart(fmt.tprint("Subdivide", depth))}
-	leafID:= bvh.node[nodeIdx].leafID
 	// if bvh.node[nodeIdx].triCount <= 2 do return
 	//determine split axis and position
-	parentCost := _calculateNodeCost(bvh^,bvh.node[nodeIdx])
+	parentCost := _calculateNodeCost(bvh.node[nodeIdx])
 	cBound := DEFAULTAABB
-	for i in 0 ..< len(bvh.leafs[leafID]) {
-		s := bvh.shape[bvh.leafs[leafID][i]]
+	for shapeID in bvh.node[nodeIdx].shapeIDs {
+		s := bvh.shape[shapeID]
 		_GrowAABB(&cBound, s.centroid)
 	}
 	bestAxis, bestPos, bestCost := _findBestSplitPlane(bvh, nodeIdx, cBound)
@@ -64,31 +57,30 @@ _Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int) {
 	if bestCost >= parentCost do return
 	//in place partition, at worst this loops over every spot, but it should average to about half or less
 	leftCount := 0
-	rightMinID := len(bvh.leafs[bvh.node[nodeIdx].leafID]) - 1
+	rightMinID := len(bvh.node[nodeIdx].shapeIDs) - 1
 	scale := (f32(bvh.splitChecks) / (cBound.upper[bestAxis] - cBound.lower[bestAxis]))
 	split := cBound.lower[bestAxis]
 	for leftCount <= rightMinID {
 		when PROFILING {profileStart("sorting step")}
 		binIdx := math.min(
-			u32((bvh.shape[bvh.leafs[leafID][leftCount]].centroid[bestAxis] - split) * scale),bvh.splitChecks - 1)
+			u32((bvh.shape[bvh.node[nodeIdx].shapeIDs[leftCount]].centroid[bestAxis] - split) * scale),bvh.splitChecks - 1)
 		
 		if binIdx < bestPos {
 			leftCount += 1
 		} else {
-			_swap(&bvh.leafs[leafID][leftCount], &bvh.leafs[leafID][rightMinID])
+			_swap(&bvh.node[nodeIdx].shapeIDs[leftCount], &bvh.node[nodeIdx].shapeIDs[rightMinID])
 			rightMinID -= 1
 		}
 	}
 	//abort split if one side empty, but the triangles will still have been shuffled
-	if leftCount == 0 || leftCount >= len(bvh.leafs[leafID]) do return
+	if leftCount == 0 || leftCount >= len(bvh.node[nodeIdx].shapeIDs) do return
 	// create child nodes
-	leftChildIdx := i32(len(bvh.node))
-	leftLeafIdx := i32(len(bvh.leafs[leafID]))
+	leftChildIdx := u32(len(bvh.node))
 	// colTree.nodesUsed += 2
 	append(
 		&bvh.node,
-		BVHNode{{}, -1, leftLeafIdx},
-		BVHNode{{}, -1, leftLeafIdx+1},
+		BVHNode{{}, 0, make([dynamic]u32)},
+		BVHNode{{}, 0, make([dynamic]u32)},
 	)
 	bvh.node[nodeIdx].leftChild = leftChildIdx
 	_UpdateNodeBounds(bvh, leftChildIdx)
@@ -97,41 +89,41 @@ _Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int) {
 	_Subdivide(bvh, leftChildIdx + 1, depth + 1)
 }
 
-_findBestSplitPlane :: proc(colTree: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u32, f32) {
+_findBestSplitPlane :: proc(bvh: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u32, f32) {
 	when PROFILING {profileStart()}
-	node := &colTree.node[nodeIdx]
+	node := &bvh.node[nodeIdx]
 	bestAxis := -1
 	bestPos: u32 = 0
 	bestCost: f32 = MAX
 	bestBalance: f32 = MAX
 	onlyAxis := 0
-	if colTree.longestOnly {
+	if bvh.longestOnly {
 		range := bound.upper - bound.lower
 		onlyAxis = max(range[0], range[1]) > range[0] ? 1 : 0
 		onlyAxis = max(range[onlyAxis], range[2]) > range[onlyAxis] ? 2 : onlyAxis
 	}
 	for axis in 0 ..< 3 {
-		if colTree.longestOnly && axis != onlyAxis do continue
+		if bvh.longestOnly && axis != onlyAxis do continue
 		when PROFILING {profileStart(fmt.tprint(axis))}
 		boundMin := bound.lower[axis]
 		boundMax := bound.upper[axis]
 		//not flat
 		if boundMin >= boundMax do continue
-		scale := (f32(colTree.splitChecks) / (boundMax - boundMin))
-		bins := make([dynamic]Bin, colTree.splitChecks)
+		scale := (f32(bvh.splitChecks) / (boundMax - boundMin))
+		bins := make([dynamic]Bin, bvh.splitChecks)
 		defer delete(bins)
 		//count triangles that fall into each bin and grow the bounds to match
-		for i in 0 ..< node.triCount {
-			s := colTree.shape[colTree.shapeIdx[node.leftChild + i]]
-			binIdx := math.min(u32((s.centroid[axis] - boundMin) * scale), colTree.splitChecks - 1)
+		for shapeID in node.shapeIDs {
+			s := bvh.shape[shapeID]
+			binIdx := math.min(u32((s.centroid[axis] - boundMin) * scale), bvh.splitChecks - 1)
 			assert(binIdx >= 0)
 			bins[binIdx].triCount += 1
 			_GrowAABB(&bins[binIdx].bounds, s.aabb)
 		}
-		leftArea := make([dynamic]f32, colTree.splitChecks)
-		rightArea := make([dynamic]f32, colTree.splitChecks)
-		leftcount := make([dynamic]f32, colTree.splitChecks)
-		rightcount := make([dynamic]f32, colTree.splitChecks)
+		leftArea := make([dynamic]f32, bvh.splitChecks)
+		rightArea := make([dynamic]f32, bvh.splitChecks)
+		leftcount := make([dynamic]f32, bvh.splitChecks)
+		rightcount := make([dynamic]f32, bvh.splitChecks)
 		defer delete(leftArea)
 		defer delete(rightArea)
 		defer delete(leftcount)
@@ -140,18 +132,18 @@ _findBestSplitPlane :: proc(colTree: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u
 		lSum, rSum: f32
 		//gather data for each potential split plane
 		//filling from the left and the right at the same time
-		for i in 0 ..< colTree.splitChecks - 1 {
+		for i in 0 ..< bvh.splitChecks - 1 {
 			lSum += f32(bins[i].triCount)
 			leftcount[i] = lSum
 			_GrowAABB(&leftBox, bins[i].bounds)
 			leftArea[i] = _areaAABB(leftBox)
-			rSum += f32(bins[colTree.splitChecks - 1 - i].triCount)
-			rightcount[colTree.splitChecks - 1 - i] = rSum
-			_GrowAABB(&rightBox, bins[colTree.splitChecks - 1 - i].bounds)
-			rightArea[colTree.splitChecks - 1 - i] = _areaAABB(rightBox)
+			rSum += f32(bins[bvh.splitChecks - 1 - i].triCount)
+			rightcount[bvh.splitChecks - 1 - i] = rSum
+			_GrowAABB(&rightBox, bins[bvh.splitChecks - 1 - i].bounds)
+			rightArea[bvh.splitChecks - 1 - i] = _areaAABB(rightBox)
 		}
 		//find the best split based on the gathered data
-		for i in 0 ..< colTree.splitChecks - 1 {
+		for i in 0 ..< bvh.splitChecks - 1 {
 			planeCost := leftcount[i] * leftArea[i] + rightcount[i] * rightArea[i]
 			balance := math.abs(leftcount[i] * leftArea[i] - rightcount[i] * rightArea[i])
 			if planeCost < bestCost && balance < bestBalance {
@@ -165,11 +157,11 @@ _findBestSplitPlane :: proc(colTree: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u
 	return bestAxis, bestPos, bestCost
 }
 
-_evaluateSAH :: proc(colTree: ^BVH, node: ^BVHNode, axis: int, pos: f32) -> f32 {
+_evaluateSAH :: proc(bvh: BVH, node: BVHNode, axis: int, pos: f32) -> f32 {
 	leftBox, rightBox: AABB
 	leftCount, rightCount: f32 = 0, 0
-	for i in 0 ..< node.triCount {
-		shape := colTree.shape[colTree.shapeIdx[node.leftChild + i]]
+	for shapeId in node.shapeIDs {
+		shape := bvh.shape[shapeId]
 		if shape.centroid[axis] < pos {
 			leftCount += 1
 			_GrowAABB(&leftBox, shape.aabb)

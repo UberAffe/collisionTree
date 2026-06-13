@@ -30,20 +30,19 @@ _bvh_Intersect :: proc(bvh: BVH, ray: ^Ray) -> (u32, u32, int) {
 	idStack := [dynamic; 64]u32{}
 	for {
 		when PROFILING {profileStart("Node scan")}
-		if (node.triCount > 0) {
+		if isLeaf(node) {
 			when PROFILING {profileStart("Leaf node")}
 			prevT: f32
-			for i in 0 ..< node.triCount {
+			for shapeId in node.shapeIDs {
 				prevT = ray.t
-				curID := int(bvh.shapeIdx[node.leftChild + i])
-				when LOGGING {log.logf(log.Level(10), "checking triangle %v", curID)}
-				_shape_Intersect(bvh.shape[curID], ray)
+				when LOGGING {log.logf(log.Level(10), "checking triangle %v", shapeId)}
+				_shape_Intersect(bvh.shape[shapeId], ray)
 				if ray.t < prevT {
 					when LOGGING {log.logf(log.Level(10), "updating t")}
-					sID = curID
+					sID = int(shapeId)
 				}
 			}
-			triIterations += node.triCount
+			triIterations += u32(len(node.shapeIDs))
 			if len(idStack) == 0 do break
 			id := pop(&idStack)
 			when LOGGING {log.logf(log.Level(10), "id %v is the new node", id)}

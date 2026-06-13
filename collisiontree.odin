@@ -46,26 +46,27 @@ SetTransform :: proc(blas: ^BLAS, bvhBounds: AABB, transform: matrix[4, 4]f32) {
 	}
 }
 
-CalculateBuildCost :: proc(ct: BVH) -> f64 {
+CalculateBuildCost :: proc(bvh: BVH) -> f64 {
 	cost: f64 = 0
-	for n in ct.node {
-		if n.triCount == 0 do continue
-		cost += f64(_calculateNodeCost(n))
+	for node in bvh.node {
+		if isLeaf(node) do continue
+		cost += f64(_calculateNodeCost(node))
 	}
 	return cost
 }
 
-Refit :: proc(ct: ^BVH) -> f64 {
+Refit :: proc(bvh: ^BVH) -> f64 {
 	cost: f64 = 0
-	for i := int(len(ct.node) - 1); i >= 0; i -= 1 {
+	for i := u32(len(bvh.node) - 1); i > 0; i -= 1 {
 		if i == 1 do continue
-		ct.node[i].aabb = DEFAULTAABB
-		if ct.node[i].triCount > 0 {
-			_UpdateNodeBounds(ct, u32(i))
-			cost += f64(_calculateNodeCost(ct.node[i]))
+		bvh.node[i].aabb = DEFAULTAABB
+		if isLeaf(bvh.node[i]) {
+			_UpdateNodeBounds(bvh, i)
+			cost += f64(_calculateNodeCost(bvh.node[i]))
 			continue
 		}
-		_GrowAABB(&ct.node[i], ct)
+		_GrowAABB(&bvh.node[i].aabb, bvh.node[bvh.node[i].leftChild])
+		_GrowAABB(&bvh.node[i].aabb, bvh.node[bvh.node[i].leftChild+1])
 	}
 	return cost
 }
@@ -74,9 +75,6 @@ Insert :: proc(bvh: ^BVH, updatedShapes: []Shape, startIDX: u32) {
 	bvh.shape = updatedShapes
 	toInsert := startIDX
 	for toInsert < u32(len(bvh.shape)) {
-		// grow the shapeIdx by the number of new triangles
-		index:= u32(len(bvh.shapeIdx))
-		append(&bvh.shapeIdx, toInsert)
 		//DFS into the bvh to find the best leaf to add to
 		toCheck := bvh.rootNodeIdx
 		_GrowAABB(&bvh.node[toCheck].aabb,bvh.shape[toInsert].aabb)
@@ -100,14 +98,9 @@ Insert :: proc(bvh: ^BVH, updatedShapes: []Shape, startIDX: u32) {
 			toCheck=c1
 		}
 		//we have identified the leaf node that is the best fit as toCheck
-		//I suppose we can put all of the existing shapes at the end of the shapeIdx
-		//that will avoid breaking everything else, but it is going to cause the shapeidx to potentially grow quickly.
-		//this process is going to leave a lot of useless duplicate spots that nothing else can use.
-		for i in bvh.node[toCheck].leftChild..<bvh.node[toCheck].triCount{
-			append(&bvh.shapeIdx,i)
-		}	
-		bvh.node[toCheck].leftChild=index
-		bvh.node[toCheck].triCount+=1
+		//now it's AABB needs to grow and the shape can be added.
+		_GrowAABB(&bvh.node[toCheck].aabb,bvh.shape[toInsert].aabb)
+		append(&bvh.node[toCheck].shapeIDs,toInsert)
 		//on to the next addition
 		toInsert += 1
 	}

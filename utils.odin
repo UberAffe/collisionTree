@@ -23,9 +23,8 @@ DEFAULTAABB :: AABB{{MIN, MIN, MIN}, {MAX, MAX, MAX}}
 
 BVHNode :: struct #align (32) {
 	using aabb: AABB `json:"aabb"`,
-	leftChild:  i32 `json:"leftFirst"`,
-	leafID:   i32 `json:"triCount"`,
-	//total size 32 bytes
+	leftChild:  u32 `json:"leftFirst"`,
+	shapeIDs: [dynamic]u32,
 }
 
 LeftRight :: struct #align (8) {
@@ -55,7 +54,7 @@ Tri :: struct {
 	vertex: [3]fl3,
 }
 
-Square :: distinct AABB
+Square :: AABB
 
 ShapeType :: union {
 	Tri,
@@ -99,9 +98,8 @@ TaskRunner :: struct {
 }
 
 BVH :: struct {
-	node:     [dynamic]BVHNode `json:"bvhNode"`,
+	node:     #soa[dynamic]BVHNode `json:"bvhNode"`,
 	shape:         []Shape `json:"-"`,
-	leafs:       [dynamic][dynamic]u32,
 	// shapeIdx:    [dynamic]u32 `json:"shapeIdx"`,
 	rootNodeIdx: u32 `json:"rootNodeIdx"`,
 	splitChecks: u32 `json:"splitChecks"`,
@@ -157,11 +155,11 @@ _growAABBWithPoint :: proc(bounds: ^AABB, point: fl3) {
 	bounds.upper = _fmaxf(bounds.upper, point)
 }
 
-_calculateNodeCost :: proc(bvh:BVH,node: BVHNode) -> f32 {
+_calculateNodeCost :: proc(node: BVHNode) -> f32 {
 	when PROFILING {profileStart()}
 	extent := node.aabb.upper - node.aabb.lower
 	return(
-		f32(len(bvh.leafs[node.leafID])) *
+		f32(len(node.shapeIDs)) *
 		(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x) \
 	)
 }
@@ -240,7 +238,7 @@ _balancedBVH :: proc(bvh: BVH) {
 	balanceList := make([dynamic]f32)
 	append(
 		&balanceList,
-		_calculateNodeCost(bvh,bvh.node[l]) - _calculateNodeCost(bvh,bvh.node[l + 1]),
+		_calculateNodeCost(bvh.node[l]) - _calculateNodeCost(bvh.node[l + 1]),
 	)
 	for {
 		breadth := len(idStack)
@@ -255,15 +253,16 @@ _balancedBVH :: proc(bvh: BVH) {
 		defer delete(b.balance)
 		#reverse for id, i in idStack {
 			if i < breadth {
-				if bvh.node[id].triCount > 0 { 	//this is a leaf node
-					b.maxT = max(bvh.node[id].triCount, b.maxT)
+				if isLeaf(bvh.node[id]) { 	//this is a leaf node
+					c:=u32(len(bvh.node[id].shapeIDs))
+					b.maxT = max(c, b.maxT)
 					switch dirStack[i] {
 					case .left:
 						b.lL += 1
-						b.lT += bvh.node[id].triCount
+						b.lT += c
 					case .right:
 						b.rL += 1
-						b.rT += bvh.node[id].triCount
+						b.rT += c
 					case .first:
 					}
 					// b.nodes -= 1

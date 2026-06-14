@@ -1,5 +1,6 @@
 package collisiontree
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 
@@ -23,14 +24,14 @@ _bvh_Build :: proc(
 	loc := #caller_location,
 ) {
 	when PROFILING {profileStart()}
-	append(&bvh.node, BVHNode{{},0,make([dynamic]u32)})
-	for &t, i in bvh.shape {
+	append(&bvh.node, BVHNode{{},0,make([dynamic]u32,0,len(bvh.shape),allocator=alloc)})
+	for t, i in bvh.shape {
 		append(&bvh.node[0].shapeIDs,u32(i))
 	}
 	bvh.longestOnly = longestOnly
 	bvh.splitChecks = max(divisionChecks, 2)
 	_UpdateNodeBounds(bvh, bvh.rootNodeIdx)
-	_Subdivide(bvh, bvh.rootNodeIdx, 0)
+	_Subdivide(bvh, bvh.rootNodeIdx, 0,alloc)
 }
 
 _UpdateNodeBounds :: proc(bvh: ^BVH, nodeIdx: u32, loc := #caller_location) {
@@ -38,13 +39,13 @@ _UpdateNodeBounds :: proc(bvh: ^BVH, nodeIdx: u32, loc := #caller_location) {
 	bvh.node[nodeIdx].aabb = DEFAULTAABB
 	for shapeID in bvh.node[nodeIdx].shapeIDs {
 		s := bvh.shape[shapeID]
-		_GrowAABB(&bvh.node[nodeIdx], s.aabb)
+		_GrowAABB(&bvh.node[nodeIdx].aabb, s.aabb)
 	}
 }
 
-_Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int) {
+_Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int, alloc:runtime.Allocator) {
 	when PROFILING {profileStart(fmt.tprint("Subdivide", depth))}
-	// if bvh.node[nodeIdx].triCount <= 2 do return
+	if len(bvh.node[nodeIdx].shapeIDs) <= 2 do return
 	//determine split axis and position
 	parentCost := _calculateNodeCost(bvh.node[nodeIdx])
 	cBound := DEFAULTAABB
@@ -76,17 +77,18 @@ _Subdivide :: proc(bvh: ^BVH, nodeIdx: u32, depth: int) {
 	if leftCount == 0 || leftCount >= len(bvh.node[nodeIdx].shapeIDs) do return
 	// create child nodes
 	leftChildIdx := u32(len(bvh.node))
-	// colTree.nodesUsed += 2
 	append(
 		&bvh.node,
-		BVHNode{{}, 0, make([dynamic]u32)},
-		BVHNode{{}, 0, make([dynamic]u32)},
+		BVHNode{{}, 0, make([dynamic]u32,0,leftCount,alloc)},
+		BVHNode{{}, 0, make([dynamic]u32,0,len(bvh.node[nodeIdx].shapeIDs)-leftCount,alloc)},
 	)
 	bvh.node[nodeIdx].leftChild = leftChildIdx
+	append(&bvh.node[leftChildIdx].shapeIDs,..bvh.node[nodeIdx].shapeIDs[:leftCount])
+	append(&bvh.node[leftChildIdx+1].shapeIDs,..bvh.node[nodeIdx].shapeIDs[leftCount:])
 	_UpdateNodeBounds(bvh, leftChildIdx)
 	_UpdateNodeBounds(bvh, leftChildIdx + 1)
-	_Subdivide(bvh, leftChildIdx, depth + 1)
-	_Subdivide(bvh, leftChildIdx + 1, depth + 1)
+	_Subdivide(bvh, leftChildIdx, depth + 1,alloc)
+	_Subdivide(bvh, leftChildIdx + 1, depth + 1,alloc)
 }
 
 _findBestSplitPlane :: proc(bvh: ^BVH, nodeIdx: u32, bound: AABB) -> (int, u32, f32) {

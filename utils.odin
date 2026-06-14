@@ -68,8 +68,7 @@ Bin :: struct {
 }
 
 Hit :: struct {
-	rayID:   u32,
-	shapeID: int,
+	shapeID: u32,
 	dist:    f32,
 }
 

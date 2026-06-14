@@ -294,6 +294,7 @@ tile_tick :: proc(tile: int) -> (u32, u32) {
 	x, y := tile % TILEW, tile / TILEW
 	ray: Ray
 	ray.O = camPos
+	hits:= make([dynamic]Hit,0,64)
 	for v in 0 ..< SCALEH {
 		for u in 0 ..< SCALEW {
 			when PROFILING {profileStart(
@@ -307,11 +308,18 @@ tile_tick :: proc(tile: int) -> (u32, u32) {
 			ray.D = la.normalize(pixelPos - ray.O)
 			ray.rD = 1 / ray.D
 			ray.t = MAX
-			bIt, tIt, shapeID := Intersect(tlas, &ray)
+			bIt, tIt := Intersect(tlas, &ray, &hits)
 			tb += bIt
 			tt += tIt
-			c: u8 = u8(240 - (ray.t - 3) * 50)
+			dist:=MAX
+			if len(hits)>0{
+				for hit in hits{
+					if hit.dist<dist do dist=hit.dist
+				}
+			}
+			c: u8 = u8(240 - (dist - 3) * 50)
 			pixels[(x * SCALEW + u) + (y * SCALEH + v) * 640] = rl.Color{c, c, c, 255}.rgba
+			clear(&hits)
 		}
 	}
 	return tb, tt

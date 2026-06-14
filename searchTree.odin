@@ -5,7 +5,15 @@ import "core:math"
 import la "core:math/linalg"
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
-_intersectBVH :: proc(tlas: TLAS, bidx: uint, originalRay: ^Ray) -> (u32, u32, int) {
+_intersectBVH :: proc(
+	tlas: TLAS,
+	bidx: uint,
+	originalRay: ^Ray,
+	hits: ^[dynamic]Hit,
+) -> (
+	u32,
+	u32,
+) {
 	when PROFILING {profileStart()}
 	colTree := tlas.blas[bidx]
 	blas := tlas.bvhList[colTree.bvhIndex]
@@ -17,7 +25,6 @@ _intersectBVH :: proc(tlas: TLAS, bidx: uint, originalRay: ^Ray) -> (u32, u32, i
 	triIterations := u32(0)
 	node := blas.bvhNode[blas.rootNodeIdx]
 	idStack := [dynamic; 64]u32{}
-	sID := -1
 	ray := originalRay^
 	ray.O = _transformPosition(ray.O, colTree.invTransform)
 	ray.D = _transformVector(ray.D, colTree.invTransform)
@@ -26,15 +33,16 @@ _intersectBVH :: proc(tlas: TLAS, bidx: uint, originalRay: ^Ray) -> (u32, u32, i
 		when PROFILING {profileStart("Node scan")}
 		if (node.triCount > 0) {
 			when PROFILING {profileStart("Leaf node")}
-			prevT: f32
+			originalT := ray.t
+			leastT := ray.t
 			for i in 0 ..< node.triCount {
-				prevT = ray.t
-				curID := int(blas.shapeIdx[node.leftFirst + i])
+				curID := blas.shapeIdx[node.leftFirst + i]
 				when LOGGING {log.logf(log.Level(10), "checking triangle %v", curID)}
 				_intersectShape(blas.tri[curID], &ray)
-				if ray.t < prevT {
+				if ray.t < originalT {
 					when LOGGING {log.logf(log.Level(10), "updating t")}
-					sID = curID
+					append(hits, Hit{curID,ray.t})
+					ray.t=originalT
 				}
 			}
 			triIterations += node.triCount
@@ -68,7 +76,7 @@ _intersectBVH :: proc(tlas: TLAS, bidx: uint, originalRay: ^Ray) -> (u32, u32, i
 		}
 	}
 	originalRay.t = ray.t
-	return bvhIterations, triIterations, sID
+	return bvhIterations, triIterations
 }
 
 _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {

@@ -70,7 +70,7 @@ _findBestMatch :: proc(list: []i32, n, a: i32) -> i32 {
 	return bestB
 }
 
-_intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray, hits: ^[dynamic]Hit) -> (u32, u32) {
+_tlas_Intersect_Multi :: proc(tlas: TLAS, ray: ^Ray, hits: ^[dynamic]Hit) -> (u32, u32) {
 	when PROFILING {profileStart()}
 	node := tlas.tlasNode[0]
 	idStack := [dynamic; 64]i32{}
@@ -79,7 +79,7 @@ _intersect_TLAS :: proc(tlas: TLAS, ray: ^Ray, hits: ^[dynamic]Hit) -> (u32, u32
 		when PROFILING {profileStart("TLAS scan")}
 		if isLeaf(node.leftRight) {
 			when PROFILING {profileStart(fmt.tprint("TLAS leaf", node.blasIdx))}
-			bIt, tIt := _intersectBVH(tlas, node.blasIdx, ray, hits)
+			bIt, tIt := Intersect(tlas, node.blasIdx, ray, hits)
 			tb += bIt
 			tt += tIt
 			if len(idStack) == 0 do break

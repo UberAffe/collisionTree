@@ -35,5 +35,5 @@ calculateBuildCost :: proc(ct: BVH) -> f64 {
 
 Create::proc{TLAS_Create,_bvh_Create}
 Destroy::proc{TLAS_Destroy,_bvh_Destroy}
-Intersect::proc{_intersect_TLAS,_intersectBVH,_intersectShape}
+Intersect::proc{_tlas_Intersect_Multi,_bvh_Intersect_Multi,_shape_Intersect}
 Build::proc{_bvh_Build,_tlas_Build}

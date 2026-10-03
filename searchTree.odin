@@ -5,11 +5,28 @@ import "core:math"
 import la "core:math/linalg"
 
 // Currently this just updates ray.t, the distance to first impact, eventually it will be updated to return the index of the closest object
-_intersectBVH :: proc(
+_bvh_Intersect_Multi :: proc(
 	tlas: TLAS,
 	bidx: uint,
 	originalRay: ^Ray,
 	hits: ^[dynamic]Hit,
+) -> (
+	u32,
+	u32,
+) {
+	return _bvh_internal_intersect(tlas, bidx, originalRay, rawptr(hits), true)
+}
+
+_bvh_Intersect_Single :: proc(tlas: TLAS, bidx: uint, originalRay: ^Ray, hit: ^Hit) -> (u32, u32) {
+	return _bvh_internal_intersect(tlas, bidx, originalRay, rawptr(hit), false)
+}
+
+_bvh_internal_intersect :: proc(
+	tlas: TLAS,
+	bidx: uint,
+	originalRay: ^Ray,
+	h: rawptr,
+	multi: bool,
 ) -> (
 	u32,
 	u32,
@@ -34,15 +51,23 @@ _intersectBVH :: proc(
 		if (node.triCount > 0) {
 			when PROFILING {profileStart("Leaf node")}
 			originalT := ray.t
-			leastT := ray.t
 			for i in 0 ..< node.triCount {
 				curID := blas.shapeIdx[node.leftFirst + i]
 				when LOGGING {log.logf(log.Level(10), "checking triangle %v", curID)}
-				_intersectShape(blas.tri[curID], &ray)
+				_shape_Intersect(blas.tri[curID], &ray)
 				if ray.t < originalT {
 					when LOGGING {log.logf(log.Level(10), "updating t")}
-					append(hits, Hit{curID,ray.t})
-					ray.t=originalT
+					if multi {
+						hits := cast(^[dynamic]Hit)h
+						append(hits, Hit{curID, ray.t})
+						ray.t=originalT
+					} else {
+						hit := cast(^Hit)h
+						if ray.t < hit.dist {
+							hit.dist = ray.t
+							hit.shapeID = curID
+						}
+					}
 				}
 			}
 			triIterations += node.triCount
@@ -113,16 +138,16 @@ _intersectAABBFloat :: proc(ray: Ray, b: AABB) -> f32 {
 	return (tmax >= tmin && tmin < ray.t && tmax > 0) ? tmin : MAX
 }
 
-_intersectShape :: proc(shape: Shape, ray: ^Ray) {
+_shape_Intersect :: proc(shape: Shape, ray: ^Ray) {
 	switch type in shape.type {
 	case Tri:
-		_intersectTri(type, ray)
+		_tri_Intersect(type, ray)
 	case Square:
-		_intersectSquare(type, ray)
+		_square_Intersect(type, ray)
 	}
 }
 
-_intersectTri :: proc(triangle: Tri, ray: ^Ray) {
+_tri_Intersect :: proc(triangle: Tri, ray: ^Ray) {
 	edge1 := triangle.vertex[1] - triangle.vertex[0]
 	edge2 := triangle.vertex[2] - triangle.vertex[0]
 	ray_cross_e2 := la.cross(ray.D, edge2)
@@ -152,6 +177,6 @@ _intersectTri :: proc(triangle: Tri, ray: ^Ray) {
 		)}
 }
 
-_intersectSquare :: proc(square: AABB, ray: ^Ray) {
+_square_Intersect :: proc(square: AABB, ray: ^Ray) {
 
 }
